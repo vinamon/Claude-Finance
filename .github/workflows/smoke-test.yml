@@ -1,0 +1,52 @@
+name: smoke-test
+
+# The build order's steps 1 and 2 (prove the keys work, prove a push arrives)
+# as a button instead of a terminal. Run it from the Actions tab or the GitHub
+# mobile app, read the result in the logs. Nothing to install, no local clone,
+# and the secrets never leave GitHub.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "What to check"
+        type: choice
+        default: both
+        options:
+          - both
+          - connection
+          - ntfy
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Step 1 - Bybit demo connection and balance
+        if: inputs.test == 'both' || inputs.test == 'connection'
+        env:
+          BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
+          BYBIT_API_SECRET: ${{ secrets.BYBIT_API_SECRET }}
+          SYMBOLS: ${{ vars.SYMBOLS }}
+        run: python scripts/test_connection.py
+
+      - name: Step 2 - ntfy push
+        if: inputs.test == 'both' || inputs.test == 'ntfy'
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ vars.NTFY_SERVER }}
+        run: python scripts/test_ntfy.py

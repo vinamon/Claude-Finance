@@ -42,6 +42,7 @@ wyjścia w bocie to dodatek, nie zabezpieczenie.
 | `main.py` | przebieg: pozycje zamknięte → wyjścia → wejścia |
 | `scripts/test_connection.py` | krok 1: połączenie i saldo demo |
 | `scripts/test_ntfy.py` | krok 2: sam push |
+| `.github/workflows/smoke-test.yml` | kroki 1 i 2 jako przycisk w Actions |
 
 ---
 
@@ -97,7 +98,27 @@ tutaj, nadpisuje `config.py` — możesz przestrajać bota bez commita:
 `SYMBOLS` jest listą po przecinku, w formacie ccxt:
 `BTC/USDT:USDT,ETH/USDT:USDT`
 
-### 5. Testy lokalne
+### 5. Testy: przyciskiem, bez terminala
+
+Nie potrzebujesz lokalnego klona ani terminala. Workflow **smoke-test** robi
+kroki 1 i 2 za ciebie:
+
+*Actions → smoke-test → Run workflow →* wybierz `both` → *Run*.
+
+Wynik czytasz w logach joba. Klucze nie opuszczają GitHub Secrets. Opcje:
+
+| Wybór | Co sprawdza |
+|---|---|
+| `connection` | połączenie z demo, saldo, specyfikacja twoich symboli |
+| `ntfy` | czy push dociera na telefon |
+| `both` | oba, po kolei |
+
+> `smoke-test` pojawi się w zakładce Actions dopiero, gdy workflow znajdzie się
+> na gałęzi domyślnej. GitHub pokazuje przycisk *Run workflow* wyłącznie dla
+> workflowów z brancha domyślnego. Czyli: najpierw merge, potem przycisk.
+
+<details>
+<summary>Jeśli jednak masz lokalnie gita</summary>
 
 ```bash
 pip install -r requirements.txt
@@ -110,9 +131,18 @@ python scripts/test_connection.py   # krok 1: saldo demo
 python scripts/test_ntfy.py         # krok 2: push na telefon
 ```
 
+</details>
+
 ### 6. Pierwszy run z telefonu
 
 Apka GitHub → repo → **Actions** → workflow **trade** → **Run workflow**.
+
+> **Kolejność ma znaczenie.** Zarówno cron, jak i przycisk *Run workflow*
+> działają wyłącznie dla workflowów leżących na gałęzi domyślnej. Zanim
+> cokolwiek odpalisz: ustaw Secrets, potem zmerguj do `main`. Odwrotna
+> kolejność znaczy czerwony run co 5 minut na `CONFIG ERROR`, dopóki nie
+> dosypiesz kluczy. Przy pustym `SYMBOLS` cron kończy się zielono i nic nie
+> robi, więc merge bez ustawionych symboli jest bezpieczny.
 
 Przy `DUMMY_MODE=true` (domyślnie) ten ręczny run **wymusza wejście na każdym
 skonfigurowanym symbolu**, ignorując rynek — po to, żeby przepchnąć cały

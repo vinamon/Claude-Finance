@@ -16,6 +16,21 @@ def enabled():
     return bool(config.ntfy_topic)
 
 
+def scrub(text):
+    """Strip the topic out of any text before it reaches a log.
+
+    Necessary because requests puts the full request URL into its exception
+    messages, and that URL contains the topic. GitHub masks secrets in logs,
+    but relying on that alone is thin: masking only covers values that arrived
+    through the secrets context, and CI logs on a public repo are the last
+    place to find out it did not.
+    """
+    text = str(text)
+    if config.ntfy_topic:
+        text = text.replace(config.ntfy_topic, "<topic>")
+    return text
+
+
 def push(title, message, priority="default", tags=None):
     """Send one notification. Never raises - a dead notifier must not kill a
     trading run, it just gets logged."""
@@ -35,12 +50,11 @@ def push(title, message, priority="default", tags=None):
             timeout=config.request_timeout_seconds,
         )
         if response.status_code >= 400:
-            # deliberately does not echo the URL, which contains the topic
             print("[notify] push rejected with HTTP %s" % response.status_code)
             return False
         return True
     except Exception as error:
-        print("[notify] push failed: %s" % error)
+        print("[notify] push failed: %s: %s" % (type(error).__name__, scrub(error)))
         return False
 
 
