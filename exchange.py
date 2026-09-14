@@ -31,12 +31,60 @@ def buildExchange():
             "options": {
                 "defaultType": "swap",
                 "defaultSubType": config.category,
+                # Sign requests against Bybit's clock, not the laptop's.
+                # See syncClock() for why this is not optional.
+                "adjustForTimeDifference": True,
             },
         }
     )
     client.enable_demo_trading(True)
     assertDemoHost(client)
+    syncClock(client)
     return client
+
+
+def syncClock(client):
+    """Measure the offset between this machine's clock and Bybit's, and sign
+    requests against theirs.
+
+    Bybit's rule is strict and asymmetric:
+
+        server_time - recv_window <= timestamp < server_time + 1000
+
+    Being LATE is forgiven up to recv_window (5s by default). Being EARLY is
+    forgiven by only 1000 ms, whatever recv_window says. So a laptop clock
+    running one second fast gets every signed request rejected with error
+    10002, while every public endpoint keeps working perfectly - which makes
+    it look like a credentials problem when it is a clock problem.
+
+    ccxt subtracts options['timeDifference'] inside nonce(), so measuring it
+    once per run makes the signed timestamp track Bybit rather than the local
+    clock. Telling the user to fix their clock is not a fix: Windows clocks
+    drift, and this would fail again at random.
+
+    Returns the offset in milliseconds (positive = this machine is ahead), or
+    None if it could not be measured.
+    """
+    try:
+        offset = client.load_time_difference()
+        return offset
+    except Exception as error:
+        # Not fatal: without the offset ccxt falls back to the raw clock, and
+        # if that is too far out the next call fails with a clear 10002.
+        print("[exchange] could not read Bybit server time (%s)" % error)
+        return None
+
+
+def clockReport(client):
+    """One line describing the clock offset, for the smoke test."""
+    offset = client.options.get("timeDifference")
+    if offset is None:
+        return "not measured"
+    direction = "ahead of" if offset > 0 else "behind"
+    note = ""
+    if abs(offset) > 1000:
+        note = "  <- beyond Bybit's 1000ms allowance, compensated in software"
+    return "local clock is %d ms %s Bybit%s" % (abs(offset), direction, note)
 
 
 def assertDemoHost(client):
