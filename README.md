@@ -153,6 +153,81 @@ Kiedy działa: ustaw `DUMMY_MODE=false` i bot zacznie słuchać strategii.
 
 ---
 
+## Uruchomienie na laptopie
+
+Bybit geoblokuje runnery GitHuba (stoja w Wirginii, USA). Na twoim wlasnym
+komputerze w Polsce tego problemu nie ma. Ponizsze dziala tak samo na Windows,
+macOS i Linuksie.
+
+### Wymagania
+
+**Python 3.10 lub nowszy** (ccxt tego wymaga). Sprawdz:
+
+```
+python --version
+```
+
+### Instalacja
+
+```
+git clone https://github.com/vinamon/Claude-Finance
+cd Claude-Finance
+pip install -r requirements.txt
+```
+
+Skopiuj `.env.example` na `.env` i uzupelnij. `.env` jest w `.gitignore`,
+wiec nigdy nie trafi do repo.
+
+### Przelacznik autostartu
+
+| Polecenie | Co robi |
+|---|---|
+| `python run.py` | jeden cykl i koniec |
+| `python run.py --loop` | krazy co 5 minut do Ctrl+C |
+| `python run.py --loop --interval 1` | to samo, co minute |
+| `python run.py --force-entry` | jeden cykl, ktory otwiera pozycje testowa |
+
+W `.env` ustawiasz zachowanie domyslne:
+
+```
+AUTOSTART=true      # samo "python run.py" zaczyna krazyc
+AUTOSTART=false     # samo "python run.py" robi jeden cykl
+```
+
+Flagi z linii polecen zawsze wygrywaja z `.env`.
+
+Harmonogram siedzi w samym skrypcie, nie w cronie ani Harmonogramie zadan
+Windows. Jeden mechanizm zamiast trzech zaleznych od systemu, i widzisz
+odliczanie do nastepnego cyklu na wlasne oczy.
+
+### Pierwsze uruchomienie, po kolei
+
+```
+python scripts/test_connection.py    # 1. czy klucze i host demo dzialaja
+python scripts/test_ntfy.py          # 2. czy push dochodzi na telefon
+python run.py --once                 # 3. przebieg bez wchodzenia w rynek
+python run.py --once --force-entry   # 4. wymuszone wejscie testowe
+python run.py --loop                 # 5. dopiero teraz automat
+```
+
+### VS Code
+
+W `.vscode/launch.json` sa gotowe konfiguracje pod F5, w tej samej kolejnosci
+co wyzej. Wybierasz z listy w panelu Run and Debug, nie musisz nic wpisywac.
+
+### Co sie dzieje po zamknieciu laptopa
+
+Nic i to jest w porzadku. **Stop loss, take profit i trailing stop siedza na
+serwerach Bybita** i dzialaja niezaleznie od tego, czy skrypt chodzi. Tracisz
+tylko wyjscie wedlug strategii i nowe wejscia. Otwarta pozycja jest
+chroniona, po prostu nie jest zarzadzana.
+
+Konsekwencja: przy wylaczonym laptopie pozycja wyjdzie wylacznie przez SL, TP
+albo trailing. Jesli cena bedzie sie miotac w bok i nie dotknie zadnego z
+nich, moze wisiec dlugo.
+
+---
+
 ## Strategie
 
 Jedna zmienna decyduje: `STRATEGY = "trend" | "meanrev" | "breakout"`.

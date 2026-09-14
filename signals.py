@@ -392,11 +392,13 @@ def entrySignal(symbol, candles):
     lets you prove the whole pipeline works without a signal ever firing.
     """
     if config.dummy_mode:
+        if config.force_entry:
+            return Decision(buy, "dummy_mode: --force-entry given, forcing a test entry")
         if config.github_event_name == "workflow_dispatch":
             return Decision(buy, "dummy_mode: manual run, forcing a test entry")
         return Decision(
             hold,
-            "dummy_mode: run was triggered by %r, not workflow_dispatch, so no entry"
+            "dummy_mode: triggered by %r without --force-entry, so no entry"
             % config.github_event_name,
         )
 
