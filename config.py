@@ -11,18 +11,33 @@ GitHub repository Variables without touching the code.
 """
 
 import os
+from pathlib import Path
 
 # Load a local .env file if one exists, so running on a laptop does not mean
 # exporting variables by hand every time you open a terminal. Values already
 # present in the real environment win, which keeps GitHub Actions unaffected.
+#
+# The path is pinned to this file's own directory rather than discovered from
+# the current working directory: otherwise "python scripts/test_connection.py"
+# and "python run.py" could disagree about which .env is in play, depending on
+# where the terminal happens to be sitting.
+env_path = Path(__file__).resolve().parent / ".env"
+dotenv_loaded = False
+dotenv_missing = False
+
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(override=False)
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+        dotenv_loaded = True
 except ImportError:
-    # python-dotenv is optional: without it, plain environment variables still
-    # work exactly as before.
-    pass
+    # Staying quiet here was a mistake worth not repeating. If a .env sits
+    # right there and python-dotenv cannot be imported, the keys never load
+    # and the only symptom is "BYBIT_API_KEY is not set" - which sends you
+    # hunting through a file that is perfectly correct. The usual cause is a
+    # virtualenv that is not active, so say so.
+    dotenv_missing = env_path.exists()
 
 # ---------------------------------------------------------------------------
 # env helpers
@@ -199,11 +214,30 @@ notified_state_file = envStr("NOTIFIED_STATE_FILE", "state/notified.json")
 request_timeout_seconds = envInt("REQUEST_TIMEOUT_SECONDS", 30)
 
 
+def envDiagnosis():
+    """Explain where settings came from, or why they did not arrive."""
+    if dotenv_missing:
+        return (
+            "found %s but python-dotenv is not installed in THIS interpreter, so "
+            "the file was ignored. Almost always a virtualenv that is not active. "
+            "Activate it (.venv\\Scripts\\Activate.ps1 on Windows, "
+            "source .venv/bin/activate elsewhere) and run again." % env_path.name
+        )
+    if dotenv_loaded:
+        return "loaded settings from %s" % env_path
+    if env_path.exists():
+        return "%s exists but was not loaded" % env_path
+    return (
+        "no .env file at %s - copy .env.example to .env and fill it in" % env_path
+    )
+
+
 def validate():
     """Return a list of human-readable configuration problems."""
     problems = []
     if not bybit_api_key or not bybit_api_secret:
         problems.append("BYBIT_API_KEY / BYBIT_API_SECRET are not set")
+        problems.append(envDiagnosis())
     if strategy not in ("trend", "meanrev", "breakout"):
         problems.append(
             "STRATEGY must be one of 'trend', 'meanrev', 'breakout', got %r" % strategy

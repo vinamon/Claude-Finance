@@ -49,9 +49,12 @@ def explain(error):
 
 
 def main():
+    print("python:         %s" % sys.executable)
+    print("config:         %s" % config.envDiagnosis())
     if not config.bybit_api_key or not config.bybit_api_secret:
-        print("BYBIT_API_KEY / BYBIT_API_SECRET are not set")
+        print("\nBYBIT_API_KEY / BYBIT_API_SECRET are not set")
         return 1
+
 
     client = buildExchange()
     # resolve ccxt's {hostname} template - printing it raw is just confusing
