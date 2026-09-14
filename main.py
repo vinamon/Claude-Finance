@@ -30,7 +30,7 @@ import config
 import executor
 import notify
 import signals
-from exchange import buildExchange
+from exchange import buildExchange, clockReport
 
 started_at = time.time()
 
@@ -217,15 +217,23 @@ def run():
     )
     if config.dummy_mode:
         log(
-            "DUMMY MODE: market signals are ignored. Entries fire only on a manual "
-            "workflow_dispatch run."
+            "DUMMY MODE: market signals are ignored. Entries fire only with "
+            "--force-entry, or on a GitHub workflow_dispatch run."
         )
     if not notify.enabled():
         log("WARNING: NTFY_TOPIC is not set, no push notifications will be sent")
 
     client = buildExchange()
     client.load_markets()
-    log("connected to Bybit demo trading (%s)" % client.urls["api"]["private"])
+    # implode_hostname resolves ccxt's {hostname} template; printing it raw
+    # makes the one line that confirms the demo host look broken.
+    log(
+        "connected to Bybit demo trading (%s), %s"
+        % (
+            client.implode_hostname(client.urls["api"]["private"]),
+            clockReport(client),
+        )
+    )
 
     notified = loadNotified()
     notified = reportClosedPositions(client, notified)
