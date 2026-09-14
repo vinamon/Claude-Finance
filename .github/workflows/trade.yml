@@ -1,0 +1,80 @@
+name: trade
+
+on:
+  schedule:
+    # Every 5 minutes. GitHub treats this as best effort, not a promise: runs
+    # are routinely late and get dropped entirely under load. The bot is built
+    # to cope (state lives on the exchange, signals scan a window of bars),
+    # but do not expect even spacing.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# Never let two runs trade at the same time.
+concurrency:
+  group: trade
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Carries the "which closes were already pushed" file between runs, so a
+      # close is announced once instead of on every run inside the lookback
+      # window. Purely cosmetic - a cache miss costs a duplicate notification,
+      # never a duplicate trade.
+      - name: Restore notification state
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: notified-${{ github.run_id }}
+          restore-keys: |
+            notified-
+
+      - name: Run bot
+        env:
+          # Secrets. Never echoed: the code prints neither keys nor the topic.
+          BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
+          BYBIT_API_SECRET: ${{ secrets.BYBIT_API_SECRET }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+
+          # Repository Variables. Anything left unset falls back to the value
+          # in config.py, so you can retune without committing code.
+          DUMMY_MODE: ${{ vars.DUMMY_MODE }}
+          SYMBOLS: ${{ vars.SYMBOLS }}
+          STRATEGY: ${{ vars.STRATEGY }}
+          POSITION_NOTIONAL_USDT: ${{ vars.POSITION_NOTIONAL_USDT }}
+          LEVERAGE: ${{ vars.LEVERAGE }}
+          STOP_LOSS_PCT: ${{ vars.STOP_LOSS_PCT }}
+          TAKE_PROFIT_PCT: ${{ vars.TAKE_PROFIT_PCT }}
+          TRAILING_STOP_PCT: ${{ vars.TRAILING_STOP_PCT }}
+          TRAILING_ACTIVATION_PCT: ${{ vars.TRAILING_ACTIVATION_PCT }}
+          ENTRY_TIMEFRAME: ${{ vars.ENTRY_TIMEFRAME }}
+          EXIT_TIMEFRAME: ${{ vars.EXIT_TIMEFRAME }}
+          SIGNAL_LOOKBACK_BARS: ${{ vars.SIGNAL_LOOKBACK_BARS }}
+          SMA_FAST_PERIOD: ${{ vars.SMA_FAST_PERIOD }}
+          SMA_SLOW_PERIOD: ${{ vars.SMA_SLOW_PERIOD }}
+          RSI_PERIOD: ${{ vars.RSI_PERIOD }}
+          RSI_OVERSOLD: ${{ vars.RSI_OVERSOLD }}
+          RSI_OVERBOUGHT: ${{ vars.RSI_OVERBOUGHT }}
+          BREAKOUT_LOOKBACK: ${{ vars.BREAKOUT_LOOKBACK }}
+          CLOSED_LOOKBACK_MINUTES: ${{ vars.CLOSED_LOOKBACK_MINUTES }}
+
+          # Lets signals.py tell a manual run apart from a cron run, which is
+          # what dummy_mode keys off.
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python main.py

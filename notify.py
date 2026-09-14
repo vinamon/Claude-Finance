@@ -1,0 +1,94 @@
+"""
+Push notifications via ntfy.sh.
+
+No account, no API key. The topic name IS the only thing standing between
+your notifications and the public, because anyone who knows a topic can read
+and post to it. So the topic must be a long random string, it lives in GitHub
+Secrets, and it is never printed to the logs.
+"""
+
+import requests
+
+import config
+
+
+def enabled():
+    return bool(config.ntfy_topic)
+
+
+def push(title, message, priority="default", tags=None):
+    """Send one notification. Never raises - a dead notifier must not kill a
+    trading run, it just gets logged."""
+    if not enabled():
+        print("[notify] NTFY_TOPIC is not set, skipping push: %s" % title)
+        return False
+
+    headers = {"Title": title, "Priority": priority}
+    if tags:
+        headers["Tags"] = ",".join(tags)
+
+    try:
+        response = requests.post(
+            "%s/%s" % (config.ntfy_server.rstrip("/"), config.ntfy_topic),
+            data=message.encode("utf-8"),
+            headers=headers,
+            timeout=config.request_timeout_seconds,
+        )
+        if response.status_code >= 400:
+            # deliberately does not echo the URL, which contains the topic
+            print("[notify] push rejected with HTTP %s" % response.status_code)
+            return False
+        return True
+    except Exception as error:
+        print("[notify] push failed: %s" % error)
+        return False
+
+
+def positionOpened(result):
+    lines = [
+        "qty %s @ %.6f" % (result["qty"], result["price"]),
+        "notional %.2f USDT" % result["notional"],
+    ]
+    if result.get("stop_loss") is not None:
+        lines.append("SL %.6f" % result["stop_loss"])
+    if result.get("take_profit") is not None:
+        lines.append("TP %.6f" % result["take_profit"])
+    if result.get("trailing_distance") is not None:
+        state = "armed" if result.get("trailing_set") else "FAILED TO SET"
+        lines.append("trail %.6f (%s)" % (result["trailing_distance"], state))
+    lines.append("why: %s" % result["reason"])
+    return push(
+        "Opened %s" % result["symbol"],
+        "\n".join(lines),
+        priority="high",
+        tags=["chart_with_upwards_trend"],
+    )
+
+
+def positionClosed(record):
+    pnl = record.get("closed_pnl")
+    direction = "up" if (pnl or 0) >= 0 else "down"
+    lines = [
+        "qty %s" % record.get("qty"),
+        "entry %s -> exit %s" % (record.get("avg_entry"), record.get("avg_exit")),
+        "pnl %s USDT" % pnl,
+    ]
+    return push(
+        "Closed %s" % record.get("symbol"),
+        "\n".join(lines),
+        priority="high",
+        tags=["chart_with_%swards_trend" % direction],
+    )
+
+
+def strategyExit(result):
+    return push(
+        "Exit signal %s" % result["symbol"],
+        "closed %s contracts\nwhy: %s" % (result["qty"], result["reason"]),
+        priority="high",
+        tags=["outbox_tray"],
+    )
+
+
+def criticalError(message):
+    return push("Bot error", message, priority="urgent", tags=["rotating_light"])
