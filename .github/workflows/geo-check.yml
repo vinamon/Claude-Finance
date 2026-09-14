@@ -1,0 +1,49 @@
+name: geo-check
+
+# Bybit fronts its API with CloudFront and geo-blocks some countries.
+# GitHub-hosted runners live in Azure regions you cannot choose on a free
+# plan, so if Bybit blocks that country the bot cannot work here at all -
+# no key, permission or retry changes that.
+#
+# This asks each Bybit host a public, unauthenticated question and prints
+# the raw answer. It needs no secrets and touches no account. Run it to
+# find out which environments, if any, are reachable from GitHub's runners.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  geo-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Where is this runner
+        run: |
+          echo "Runner public IP and location, as CloudFront sees it:"
+          curl -sS -m 15 https://ipinfo.io/json || echo "(ipinfo unavailable)"
+
+      - name: Can this runner reach each Bybit environment
+        run: |
+          for host in api-demo.bybit.com api-testnet.bybit.com api.bybit.com; do
+            echo "==================== $host"
+            code=$(curl -sS -m 20 -o /tmp/body -w "%{http_code}" \
+                   "https://$host/v5/market/time" || echo "000")
+            echo "HTTP $code"
+            head -c 300 /tmp/body; echo
+            if [ "$code" = "200" ]; then
+              echo ">>> REACHABLE"
+            else
+              echo ">>> BLOCKED or unreachable"
+            fi
+            echo
+          done
+
+      - name: Verdict
+        run: |
+          echo "200 on api-demo      -> the bot works as designed, the earlier failure was something else"
+          echo "200 on api-testnet   -> switch to testnet: a one-line change in exchange.py"
+          echo "403 on everything    -> Bybit blocks GitHub's runners. See the README section on this."
