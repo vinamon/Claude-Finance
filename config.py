@@ -12,6 +12,18 @@ GitHub repository Variables without touching the code.
 
 import os
 
+# Load a local .env file if one exists, so running on a laptop does not mean
+# exporting variables by hand every time you open a terminal. Values already
+# present in the real environment win, which keeps GitHub Actions unaffected.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
+except ImportError:
+    # python-dotenv is optional: without it, plain environment variables still
+    # work exactly as before.
+    pass
+
 # ---------------------------------------------------------------------------
 # env helpers
 # ---------------------------------------------------------------------------
@@ -74,6 +86,19 @@ dummy_mode = envBool("DUMMY_MODE", True)
 # GitHub Actions sets this. "workflow_dispatch" means a human pressed the
 # button; "schedule" means cron fired.
 github_event_name = envStr("GITHUB_EVENT_NAME", "local")
+
+# The local equivalent of pressing that button. Running off a laptop there is
+# no GITHUB_EVENT_NAME, so without this dummy_mode could never open its test
+# position. Set by run.py --force-entry, and deliberately one-shot: in loop
+# mode it applies to the first cycle only, otherwise a forced entry would fire
+# on every symbol every few minutes forever.
+force_entry = envBool("FORCE_ENTRY", False)
+
+# Loop by default, or run once and exit. This is the autostart switch.
+autostart = envBool("AUTOSTART", False)
+
+# Minutes between cycles in loop mode.
+loop_interval_minutes = envInt("LOOP_INTERVAL_MINUTES", 5)
 
 # ---------------------------------------------------------------------------
 # TODO(you): fill these in. Deliberately left empty / placeholder - these are
