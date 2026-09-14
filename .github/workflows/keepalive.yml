@@ -1,0 +1,29 @@
+name: keepalive
+
+# GitHub disables scheduled workflows in a repository that has seen no commits
+# for 60 days. A workflow that merely runs does not reset that clock - only
+# repository activity does. So this pushes an empty commit once a week, which
+# costs nothing and keeps trade.yml's cron alive.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push an empty commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive so the trade schedule stays enabled"
+          git push
