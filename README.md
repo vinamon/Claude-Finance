@@ -22,11 +22,22 @@ W configu podajesz ułamek (`TRAILING_STOP_PCT = 0.015`), a bot sam mnoży go
 przez cenę wejścia. `activePrice` to cena aktywacji: do jej osiągnięcia
 trailing śpi.
 
-**3. Cron GitHuba kłamie.** `*/5` to prośba, nie obietnica. Runy potrafią się
-spóźnić kilkanaście minut albo zostać pominięte. Konsekwencja: **wyjście po
-świecy 1m jest sprawdzane w zrywach, nie świeca po świecy.** Tym, co naprawdę
-pilnuje pozycji między runami, są SL/TP/trailing po stronie giełdy. Logika
-wyjścia w bocie to dodatek, nie zabezpieczenie.
+**3. Wyjście dziedziczy ramę czasową wejścia.** `EXIT_TIMEFRAME` jest celowo
+nieustawione. Wyjście używa **tego samego wskaźnika i tych samych okresów** co
+wejście, więc liczenie go na krótszej ramie nie jest symetrycznym wyjściem,
+tylko wielokrotnie bardziej nerwowym. Zmierzone na żywo: SMA50/200 czyta 258
+godzin historii na 1h i 4 godziny na 1m, czyli różnicę 65-krotną. Krótka rama
+wyjścia zamyka pozycje, które trend wejściowy nadal popiera, i płaci za to
+prowizję.
+
+Tym, co pilnuje pozycji między przebiegami, są i tak SL, TP oraz trailing po
+stronie giełdy. Logika wyjścia w bocie to dodatek, nie zabezpieczenie.
+
+**4. Trailing: aktywacja musi być >= dystans.** Bybit ustawia pierwszy trigger
+trailingu na (aktywacja - dystans). Przy 5% i 3% ląduje on 2% **nad** wejściem
+i uzbrojenie trailingu blokuje zysk. Odwrotnie ląduje pod wejściem i zamienia
+trailing we wczesną stratę, która strzela zanim zadziała stop loss.
+`config.validate()` odmawia uruchomienia przy złej kombinacji.
 
 ---
 
@@ -90,7 +101,8 @@ tutaj, nadpisuje `config.py` — możesz przestrajać bota bez commita:
 
 `DUMMY_MODE`, `SYMBOLS`, `STRATEGY`, `POSITION_NOTIONAL_USDT`, `LEVERAGE`,
 `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`, `TRAILING_STOP_PCT`,
-`TRAILING_ACTIVATION_PCT`, `ENTRY_TIMEFRAME`, `EXIT_TIMEFRAME`,
+`TRAILING_ACTIVATION_PCT`, `ENTRY_TIMEFRAME`, `EXIT_TIMEFRAME` (pomiń,
+żeby dziedziczyło po `ENTRY_TIMEFRAME`),
 `SIGNAL_LOOKBACK_BARS`, `SMA_FAST_PERIOD`, `SMA_SLOW_PERIOD`, `RSI_PERIOD`,
 `RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `BREAKOUT_LOOKBACK`,
 `CLOSED_LOOKBACK_MINUTES`.

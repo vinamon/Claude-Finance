@@ -134,7 +134,7 @@ strategy = envStr("STRATEGY", "trend")
 # TODO(you): notional value of each position, in USDT. This is qty * price,
 # NOT the margin you put up. Margin used is roughly notional / leverage, so at
 # notional 500 and leverage 5 you are risking 100 USDT of margin.
-position_notional_usdt = envFloat("POSITION_NOTIONAL_USDT", 100.0)
+position_notional_usdt = envFloat("POSITION_NOTIONAL_USDT", 1000.0)
 
 # TODO(you): leverage. 1 means no leverage. Higher leverage does not change
 # your notional above, it changes how little margin backs it, i.e. how close
@@ -143,31 +143,46 @@ leverage = envInt("LEVERAGE", 1)
 
 # TODO(you): exit distances, as a fraction of the entry price.
 # 0.02 == 2%. Set any of them to 0 to disable that leg.
-stop_loss_pct = envFloat("STOP_LOSS_PCT", 0.02)
-take_profit_pct = envFloat("TAKE_PROFIT_PCT", 0.04)
+stop_loss_pct = envFloat("STOP_LOSS_PCT", 0.05)
+take_profit_pct = envFloat("TAKE_PROFIT_PCT", 0.10)
 
 # Trailing stop. Bybit's API takes a PRICE DISTANCE here, not a percentage
 # (verified against the v5 docs: "Trailing stop by price distance"), so this
 # fraction gets multiplied by the entry price before being sent.
-trailing_stop_pct = envFloat("TRAILING_STOP_PCT", 0.015)
+trailing_stop_pct = envFloat("TRAILING_STOP_PCT", 0.03)
 
 # Trailing stop activation. The trailing stop stays dormant until price
 # reaches entry * (1 + this). Set to 0 to arm the trailing stop immediately.
-trailing_activation_pct = envFloat("TRAILING_ACTIVATION_PCT", 0.01)
+#
+# MUST be >= trailing_stop_pct, and validate() refuses to run otherwise.
+# Bybit places the trail's first trigger at (activation - distance). If the
+# activation is the smaller of the two, that trigger lands BELOW your entry,
+# so arming the trail caps a loss instead of protecting a profit - and it
+# fires long before the stop loss would. Observed live at 1% activation with
+# a 1.5% distance: the trail sat 0.49% under the entry price.
+trailing_activation_pct = envFloat("TRAILING_ACTIVATION_PCT", 0.05)
 
 # ---------------------------------------------------------------------------
 # strategy parameters - see signals.py for what each one does
 # ---------------------------------------------------------------------------
 
 # Timeframe the entry signal is evaluated on.
-entry_timeframe = envStr("ENTRY_TIMEFRAME", "1h")
+entry_timeframe = envStr("ENTRY_TIMEFRAME", "4h")
 
-# Timeframe the exit signal is evaluated on. The plan asks for 1m here; be
-# aware the bot only wakes up every ~5 minutes (often less often, see README),
-# so a 1m exit is checked in bursts, not bar by bar. The exchange-side
-# stopLoss / takeProfit / trailingStop are what actually protect you between
-# runs.
-exit_timeframe = envStr("EXIT_TIMEFRAME", "1m")
+# Timeframe the exit signal is evaluated on. Defaults to the entry timeframe,
+# and that default is the point: the exit rule uses the SAME indicator and the
+# SAME periods as the entry, so evaluating it on a much shorter timeframe is
+# not a symmetric exit, it is a 65x noisier one.
+#
+# Measured on live data: SMA50/200 on 1h reads 258 hours of history, the same
+# periods on 1m read 4 hours. A crossing on the minute chart happens several
+# times a day; on the hourly it happens once in weeks. Keeping 1m here would
+# close positions the entry trend still endorses, paying fees each time.
+#
+# Override only if you deliberately want a faster exit than your entry, and
+# expect the churn that comes with it. The exchange-side stopLoss,
+# takeProfit and trailingStop are what protect you between runs either way.
+exit_timeframe = envStr("EXIT_TIMEFRAME", entry_timeframe)
 
 # How many recently closed candles to scan for a signal event. A cron-driven
 # bot misses bars, so looking only at the newest bar would throw away most
@@ -248,4 +263,19 @@ def validate():
         problems.append("LEVERAGE must be >= 1")
     if sma_fast_period >= sma_slow_period:
         problems.append("SMA_FAST_PERIOD must be smaller than SMA_SLOW_PERIOD")
+    # A trailing stop whose activation sits below its own distance arms BELOW
+    # the entry price, turning profit protection into an early loss. Zero
+    # activation is a deliberate "arm immediately" and is left alone.
+    if trailing_stop_pct > 0 and 0 < trailing_activation_pct < trailing_stop_pct:
+        problems.append(
+            "TRAILING_ACTIVATION_PCT (%.4g) is smaller than TRAILING_STOP_PCT "
+            "(%.4g), so the trailing stop would arm %.2f%% BELOW your entry and "
+            "close at a loss before the stop loss ever triggers. Raise the "
+            "activation to at least the distance."
+            % (
+                trailing_activation_pct,
+                trailing_stop_pct,
+                (trailing_stop_pct - trailing_activation_pct) * 100,
+            )
+        )
     return problems

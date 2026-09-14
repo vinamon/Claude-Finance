@@ -100,12 +100,49 @@ and the only symptom is "keys not set".
 `--force-entry` or a GitHub `workflow_dispatch` run. `--force-entry` is
 one-shot in loop mode on purpose.
 
-## Left to the owner. Do not invent values.
+## Parameter choices, and why they are what they are
 
-`SYMBOLS`, entry conditions in `signals.py`, SL/TP/trailing percentages,
-position size and leverage are marked `TODO(you)` in `config.py`. All three
-strategies are textbook starting points for tuning, explicitly not edges.
-Assume each loses money after fees until a backtest says otherwise.
+The owner originally reserved these decisions and later handed them over,
+asking for simple textbook settings based on well-known signals. The set below
+is the result. It is a starting point for tuning, not a strategy with a
+demonstrated edge: assume it loses money after fees until a backtest says
+otherwise.
+
+**`ENTRY_TIMEFRAME=4h`.** SMA 50/200 is a daily-chart signal in the
+textbooks. On 1h it runs about eight times faster than intended and reads as
+noise; on 1d it fires once or twice a year. At 4h, SMA50 covers ~8 days and
+SMA200 ~33, a normal crypto swing horizon that still produces observable
+signals.
+
+**`EXIT_TIMEFRAME` is unset on purpose.** It inherits `ENTRY_TIMEFRAME`. The
+exit uses the same indicator and the same periods as the entry, so running it
+on a shorter timeframe is not a symmetric exit but a much noisier one.
+Measured live: SMA50/200 reads 258 hours of history on 1h and 4 hours on 1m, a
+65x difference. A short exit timeframe closes positions the entry trend still
+endorses and pays fees for it.
+
+**`STOP_LOSS_PCT=0.05`, `TAKE_PROFIT_PCT=0.10`.** The stop is a disaster
+brake, not the primary exit; the death cross is. A 2% stop on a 4h trend
+strategy fires on routine BTC noise before the trend can play out. 1:2
+risk-to-reward.
+
+**`TRAILING_STOP_PCT=0.03`, `TRAILING_ACTIVATION_PCT=0.05`.** Activation must
+be >= distance and `config.validate()` refuses to run otherwise. Bybit puts
+the trail's first trigger at (activation - distance), so 5% and 3% land it 2%
+above entry and arming the trail locks in profit. Reversed, it lands below
+entry and fires as an early loss before the stop loss would. This was observed
+live at 1% activation with a 1.5% distance: the trail sat 0.49% under entry.
+
+**`POSITION_NOTIONAL_USDT=1000`.** 2% of the 50,000 USDT demo balance, and
+twelve times Bybit's 0.001 BTC minimum lot at current prices. A notional that
+sits exactly on the minimum gets the order REFUSED as soon as the price rises
+enough that the notional no longer covers one lot.
+
+**`LEVERAGE=1`.** Leverage does not change position size, only how close
+liquidation sits.
+
+SMA 50/200, RSI 14 with 30/70, and Donchian 20 are left at their textbook
+values.
 
 ## Conventions
 
