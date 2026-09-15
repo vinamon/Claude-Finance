@@ -189,7 +189,43 @@ def computeQty(spec, price, notional_usdt):
     return qty
 
 
-def exitPrices(spec, entry_price):
+def riskDistances(entry_price, atr_value):
+    """How far the stop, target, trail and its activation sit from entry, in
+    price units. Returns (distances, model_name).
+
+    Two models, chosen by RISK_MODEL:
+
+    "atr" measures everything in the instrument's own recent volatility. Two
+    ATR is the same amount of risk on BTC as on a small alt, and the same
+    amount in a calm week as in a violent one. A flat percentage is neither:
+    it is too tight somewhere and too wide somewhere else, and the market
+    decides which.
+
+    "pct" is a flat fraction of the entry price.
+
+    The ATR model falls back to the percentage one when ATR is unavailable -
+    a fresh symbol without enough history should not silently trade naked.
+    """
+    if config.risk_model == "atr" and atr_value and atr_value > 0:
+        return {
+            "stop": atr_value * config.atr_stop_mult,
+            "target": atr_value * config.atr_target_mult,
+            "trail": atr_value * config.atr_trail_mult,
+            "activation": atr_value * config.atr_trail_activation_mult,
+        }, "atr(%d)=%.6f" % (config.atr_period, atr_value)
+
+    model = "pct"
+    if config.risk_model == "atr":
+        model = "pct (ATR unavailable, fell back)"
+    return {
+        "stop": entry_price * config.stop_loss_pct,
+        "target": entry_price * config.take_profit_pct,
+        "trail": entry_price * config.trailing_stop_pct,
+        "activation": entry_price * config.trailing_activation_pct,
+    }, model
+
+
+def exitPrices(spec, entry_price, atr_value=None):
     """Stop loss / take profit prices and the trailing distance, for a long.
 
     trailing_distance is a PRICE DISTANCE, not a percentage: Bybit's v5 docs
@@ -198,38 +234,39 @@ def exitPrices(spec, entry_price):
     stop roughly at the current price.
     """
     tick = spec["tick_size"]
+    distances, model = riskDistances(entry_price, atr_value)
     prices = {"stop_loss": None, "take_profit": None, "trailing_distance": None,
-              "trailing_activation": None}
+              "trailing_activation": None, "risk_model": model}
 
-    if config.stop_loss_pct > 0:
+    if distances["stop"] > 0:
         # round DOWN so the stop sits at or slightly further from entry, never
         # closer than requested
-        stop = floorToStep(entry_price * (1 - config.stop_loss_pct), tick)
+        stop = floorToStep(entry_price - distances["stop"], tick)
         if stop <= 0 or stop >= entry_price:
             raise ExecutionError(
-                "stop loss %.8f is not below entry %.8f - check STOP_LOSS_PCT"
-                % (stop, entry_price)
+                "stop loss %.8f is not below entry %.8f - check the %s risk settings"
+                % (stop, entry_price, config.risk_model)
             )
         prices["stop_loss"] = stop
 
-    if config.take_profit_pct > 0:
+    if distances["target"] > 0:
         # round UP for the same reason, in the other direction
-        target = ceilToStep(entry_price * (1 + config.take_profit_pct), tick)
+        target = ceilToStep(entry_price + distances["target"], tick)
         if target <= entry_price:
             raise ExecutionError(
-                "take profit %.8f is not above entry %.8f - check TAKE_PROFIT_PCT"
-                % (target, entry_price)
+                "take profit %.8f is not above entry %.8f - check the %s risk settings"
+                % (target, entry_price, config.risk_model)
             )
         prices["take_profit"] = target
 
-    if config.trailing_stop_pct > 0:
-        distance = ceilToStep(entry_price * config.trailing_stop_pct, tick)
+    if distances["trail"] > 0:
+        distance = ceilToStep(distances["trail"], tick)
         if distance < tick:
             distance = tick
         prices["trailing_distance"] = distance
-        if config.trailing_activation_pct > 0:
+        if distances["activation"] > 0:
             prices["trailing_activation"] = ceilToStep(
-                entry_price * (1 + config.trailing_activation_pct), tick
+                entry_price + distances["activation"], tick
             )
 
     return prices
@@ -240,25 +277,48 @@ def exitPrices(spec, entry_price):
 # ---------------------------------------------------------------------------
 
 
-def buildOrderLinkId(market_id, bucket_seconds=300):
-    """Deterministic per (symbol, time bucket) client order id.
+def strategyTag(strategy):
+    """One character standing for the strategy, for the order id.
+
+    Bybit shows orderLinkId in its own UI, so tagging the id means you can
+    tell at a glance which rule opened a position without consulting anything
+    local. Derived from the name rather than a hardcoded table, so adding a
+    strategy needs no change here - validated for collisions in validate()'s
+    sibling checks by the fact that the names differ in their first letter.
+    """
+    if not strategy:
+        return "x"
+    return "".join(char for char in strategy if char.isalnum())[:1].lower() or "x"
+
+
+def buildOrderLinkId(market_id, strategy=None, bucket_seconds=None):
+    """Deterministic per (symbol, strategy, time bucket) client order id.
 
     Bybit rejects a duplicate orderLinkId. Bucketing by the scheduling
-    interval means a retry inside the same run reuses the id and gets
+    interval means a retry inside the same bucket reuses the id and gets
     rejected - which is exactly what we want, because a retry after an
-    ambiguous timeout must not open a second position. The next scheduled run
-    lands in a new bucket and is free to trade again.
+    ambiguous timeout must not open a second position. The next cycle lands in
+    a new bucket and is free to trade again.
+
+    The bucket length comes from config.order_bucket_seconds, which defaults
+    to the loop interval. Those two must not drift apart: a bucket longer than
+    the interval blocks a cycle that legitimately wants to retry until the
+    bucket rolls over.
 
     Max 36 characters, letters/digits/dash/underscore only.
     """
-    bucket = int(time.time() // bucket_seconds)
+    if bucket_seconds is None:
+        bucket_seconds = config.order_bucket_seconds
+    bucket = int(time.time() // max(1, bucket_seconds))
     safe_id = "".join(char for char in market_id if char.isalnum() or char in "-_")
-    candidate = "%s-%s-%d" % (config.order_link_prefix, safe_id, bucket)
+    tag = strategyTag(strategy)
+    candidate = "%s-%s-%s-%d" % (config.order_link_prefix, safe_id, tag, bucket)
     if len(candidate) <= 36:
         return candidate
-    # keep the prefix and bucket readable, trim the symbol
+    # keep the prefix, tag and bucket readable, trim the symbol
     overflow = len(candidate) - 36
-    return "%s-%s-%d" % (config.order_link_prefix, safe_id[: max(1, len(safe_id) - overflow)], bucket)
+    trimmed = safe_id[: max(1, len(safe_id) - overflow)]
+    return "%s-%s-%s-%d" % (config.order_link_prefix, trimmed, tag, bucket)
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +349,14 @@ def applyLeverage(client, symbol, log):
 # ---------------------------------------------------------------------------
 
 
-def execute(client, symbol, decision, price, log):
-    """Act on a signals.Decision. Returns a dict describing what happened."""
+def execute(client, symbol, decision, price, log, atr_value=None):
+    """Act on a signals.Decision. Returns a dict describing what happened.
+
+    `atr_value` is the latest ATR on the entry timeframe, computed by the
+    caller from candles it has already fetched. It is what the "atr" risk
+    model sizes the stop, target and trail from; pass None and the percentage
+    model takes over.
+    """
     if decision.action != signals.buy:
         log("%s: no entry - %s" % (symbol, decision.reason))
         return {"opened": False, "reason": decision.reason}
@@ -311,8 +377,8 @@ def execute(client, symbol, decision, price, log):
     # order and buys something worth more: the position is never naked, not
     # even for the round trip of a second API call.
 
-    targets = exitPrices(spec, price)
-    order_link_id = buildOrderLinkId(spec["market_id"])
+    targets = exitPrices(spec, price, atr_value)
+    order_link_id = buildOrderLinkId(spec["market_id"], decision.strategy)
 
     params = {
         "category": config.category,
@@ -328,13 +394,16 @@ def execute(client, symbol, decision, price, log):
         params["takeProfit"] = {"triggerPrice": targets["take_profit"]}
 
     log(
-        "%s: opening long qty=%s @~%.6f (notional %.2f USDT, %sx) sl=%s tp=%s linkId=%s"
+        "%s: opening long qty=%s @~%.6f (notional %.2f USDT, %sx) strategy=%s risk=%s "
+        "sl=%s tp=%s linkId=%s"
         % (
             symbol,
             formatDecimal(qty, spec["qty_step"]),
             price,
             qty * price,
             config.leverage,
+            decision.strategy,
+            targets["risk_model"],
             targets["stop_loss"],
             targets["take_profit"],
             order_link_id,
@@ -348,6 +417,9 @@ def execute(client, symbol, decision, price, log):
     return {
         "opened": True,
         "reason": decision.reason,
+        "strategy": decision.strategy,
+        "votes": decision.votes,
+        "risk_model": targets["risk_model"],
         "symbol": symbol,
         "qty": qty,
         "price": price,
@@ -422,7 +494,10 @@ def closePosition(client, symbol, position, reason, log):
         "category": config.category,
         "positionIdx": config.position_idx,
         "reduceOnly": True,
-        "orderLinkId": buildOrderLinkId(spec["market_id"] + "x"),
+        # "close" tags this id so it can never collide with the entry id for
+        # the same symbol in the same bucket, while staying just as
+        # idempotent against a retried close.
+        "orderLinkId": buildOrderLinkId(spec["market_id"], "close"),
     }
 
     log("%s: closing %s contracts (%s) - %s" % (symbol, size, side, reason))

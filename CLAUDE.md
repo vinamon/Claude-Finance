@@ -9,8 +9,8 @@ Run it from a laptop, not CI. See "Why not GitHub Actions" below.
 
 | File | Role |
 |---|---|
-| `config.py` | settings from `.env` / env vars, the TODO block, `validate()` |
-| `signals.py` | three strategies, entries and exits. Pure functions, no orders |
+| `config.py` | every knob, from `.env` / env vars, plus `validate()` and `warnings()` |
+| `signals.py` | indicators, the regime filter, three strategies, voting. Pure functions, no orders |
 | `executor.py` | decisions to orders. No strategy logic |
 | `exchange.py` | ccxt client pinned to the demo host |
 | `notify.py` | ntfy.sh push |
@@ -58,10 +58,17 @@ every ccxt OHLCV response. The final candle is still forming and its close is
 just the current price, so a signal computed on it fires and un-fires inside
 one bar.
 
-**`orderLinkId` is deterministic per (symbol, 5-minute bucket).** A retry
-inside one run reuses the id and Bybit rejects it, which is the point: a retry
-after an ambiguous timeout must not open a second position. The next run lands
-in a new bucket.
+**`orderLinkId` is deterministic per (symbol, strategy, time bucket).** A
+retry inside one bucket reuses the id and Bybit rejects it, which is the
+point: a retry after an ambiguous timeout must not open a second position. The
+next cycle lands in a new bucket.
+
+The bucket length is `ORDER_BUCKET_SECONDS`, which defaults to the loop
+interval and is re-derived when `--interval` overrides it. These two must not
+drift apart: a bucket longer than the interval blocks a cycle that
+legitimately wants to retry until the bucket rolls over. It used to be a
+hardcoded 300 seconds, which stopped matching the moment the interval moved
+off 5 minutes.
 
 **Quantity rounds down** to `qtyStep` and is refused below `minOrderQty`,
 rather than quietly trading a size nobody asked for.
@@ -92,7 +99,10 @@ python run.py --loop          cycle until Ctrl+C
 python run.py --force-entry   one cycle that opens a test position
 ```
 
-`AUTOSTART` in `.env` sets the default; flags override it. Requires Python
+`AUTOSTART` in `.env` sets the default; flags override it. It is NOT an
+operating-system autostart despite the name: nothing here registers with
+Windows or macOS, so the bot does not come back by itself after a reboot.
+Requires Python
 3.10+ (ccxt's floor) and an active virtualenv, or `.env` is silently ignored
 and the only symptom is "keys not set".
 
@@ -100,52 +110,117 @@ and the only symptom is "keys not set".
 `--force-entry` or a GitHub `workflow_dispatch` run. `--force-entry` is
 one-shot in loop mode on purpose.
 
+## Every setting is a knob. Do not hardcode one.
+
+No period, threshold, multiplier or boolean is written into `signals.py`,
+`executor.py` or `run.py`. Each reads `config.<name>`, and each of those reads
+an environment variable of the same upper-case name. `.env.example` is the
+complete control panel and documents every entry. A bare number inside a
+strategy function is a bug; add the knob to `config.py` instead.
+
+`config.validate()` refuses to run on an incoherent combination and
+`config.warnings()` flags legal-but-probably-unintended ones. Retired setting
+names live in `config.retired_settings` so a stale key in `.env` is reported
+instead of silently ignored.
+
+## Running three strategies at once
+
+`STRATEGY=multi` evaluates every strategy in `ACTIVE_STRATEGIES` each cycle
+and enters when at least `MIN_ENTRY_VOTES` agree. Three things make that
+coherent rather than self-defeating:
+
+**The regime filter is load-bearing.** Trend following buys strength, mean
+reversion buys weakness; run side by side without a filter one strategy's
+entry is the other's exit. `REGIME_FILTER` allows long entries only above the
+`REGIME_PERIOD` average, which turns mean reversion into "buy the dip inside
+an uptrend" - the documented version - so all three pull the same way and
+differ only in the trigger. Turning it off is supported and is a different,
+worse system.
+
+**The strategy that opened a position owns its exit.** One-way mode holds one
+position per symbol, so the owner is recorded in `state/owners.json` and
+tagged into `orderLinkId` (visible in Bybit's own UI). Measured on the same
+uptrend: a `trend` owner holds while a `meanrev` owner exits, because for
+mean reversion the bounce has already happened. Closing a mean-reversion trade
+on a trend-following rule ruins both strategies at once.
+
+`state/owners.json` is best effort and is NOT authoritative about whether a
+position exists - the exchange still is. It answers a different question:
+which rule should decide when to let go. Lose it and `UNKNOWN_OWNER_EXIT`
+decides. Same status as `state/notified.json`.
+
+**Positions are read in one pass before any decision.** `MAX_OPEN_POSITIONS`
+cannot be honoured while discovering positions symbol by symbol - the count
+would only include symbols already visited. `main.run()` reads them all first,
+then acts, keeping the count current as positions open and close.
+
 ## Parameter choices, and why they are what they are
 
 The owner originally reserved these decisions and later handed them over,
-asking for simple textbook settings based on well-known signals. The set below
-is the result. It is a starting point for tuning, not a strategy with a
-demonstrated edge: assume it loses money after fees until a backtest says
-otherwise.
+asking for simple textbook settings based on well-known signals, and later
+still for more aggressive ones that still deserve trust. The set below is the
+result. It is a starting point for tuning, not a demonstrated edge: assume it
+loses money after fees until a backtest says otherwise.
 
-**`ENTRY_TIMEFRAME=4h`.** SMA 50/200 is a daily-chart signal in the
-textbooks. On 1h it runs about eight times faster than intended and reads as
-noise; on 1d it fires once or twice a year. At 4h, SMA50 covers ~8 days and
-SMA200 ~33, a normal crypto swing horizon that still produces observable
-signals.
+**`ENTRY_TIMEFRAME=1h` with EMA 20/50, not 4h with SMA 50/200.** The old
+reasoning still holds for the old indicator: SMA 50/200 IS a daily-chart
+signal, which is why 4h was right for it. Changing the indicator changes the
+natural timeframe with it. EMA 20/50 on 1h is about one day against two days
+of history, with the 200-period regime line at roughly eight days.
 
 **`EXIT_TIMEFRAME` is unset on purpose.** It inherits `ENTRY_TIMEFRAME`. The
-exit uses the same indicator and the same periods as the entry, so running it
-on a shorter timeframe is not a symmetric exit but a much noisier one.
-Measured live: SMA50/200 reads 258 hours of history on 1h and 4 hours on 1m, a
-65x difference. A short exit timeframe closes positions the entry trend still
-endorses and pays fees for it.
+exit uses the same indicator and periods as the entry, so a shorter timeframe
+is not a symmetric exit but a far noisier one. Measured live: the same MA pair
+read 258 hours of history on 1h and 4 hours on 1m, a 65x difference.
 
-**`STOP_LOSS_PCT=0.05`, `TAKE_PROFIT_PCT=0.10`.** The stop is a disaster
-brake, not the primary exit; the death cross is. A 2% stop on a 4h trend
-strategy fires on routine BTC noise before the trend can play out. 1:2
-risk-to-reward.
+**`ADX_MIN=20`.** A bare MA crossover fires on every wiggle and bleeds in
+ranges. ADX is the standard filter for exactly that. Measured over 31 days on
+nine symbols, `trend` alone won 27% of its trades and finished slightly
+negative - the filter is what keeps it from being much worse, and 31 days is
+far too short to judge a trend system, which earns its keep in rare large
+moves. Do not delete it on the strength of one month.
 
-**`TRAILING_STOP_PCT=0.03`, `TRAILING_ACTIVATION_PCT=0.05`.** Activation must
-be >= distance and `config.validate()` refuses to run otherwise. Bybit puts
-the trail's first trigger at (activation - distance), so 5% and 3% land it 2%
-above entry and arming the trail locks in profit. Reversed, it lands below
-entry and fires as an early loss before the stop loss would. This was observed
-live at 1% activation with a 1.5% distance: the trail sat 0.49% under entry.
+**`RSI_PERIOD=2` with `RSI_OVERSOLD=10`, not 14 with 30.** This is the
+Connors RSI-2 pullback pattern. Measured on the same 31 days it won 68% of
+trades with an average hold of 3 bars, which is precisely the published
+signature of RSI-2: high hit rate, small wins. It only works paired with the
+regime filter. Caveat worth keeping: RSI-2 was built on equity indices, which
+mean-revert more than crypto does.
 
-**`POSITION_NOTIONAL_USDT=1000`.** 2% of the 50,000 USDT demo balance, and
-twelve times Bybit's 0.001 BTC minimum lot at current prices. A notional that
-sits exactly on the minimum gets the order REFUSED as soon as the price rises
-enough that the notional no longer covers one lot.
+**`BREAKOUT_EXIT_LOOKBACK=10` against `BREAKOUT_LOOKBACK=20`.** The original
+Turtle asymmetry. A symmetric channel gives back most of a move before
+admitting the trend is over, because a new 20-bar low arrives long after the
+trend died.
+
+**`RISK_MODEL=atr`.** Measured live in one instant: ATR14 was 0.48% of price
+on BTC and 1.02% on XRP. A flat percentage is therefore too tight on one
+market and too wide on another, and the market picks which. Stop 2 ATR, target
+4 ATR, trail 1.5 ATR arming at 3 ATR - so the trail's first trigger sits 1.5
+ATR ABOVE entry by construction. Falls back to the percentage model when ATR
+cannot be computed, so both sets stay meaningful.
+
+**Activation >= distance, in both models.** Bybit puts the trail's first
+trigger at (activation - distance). Reversed it lands below entry and fires as
+an early loss before the stop loss would - observed live at 1% activation with
+a 1.5% distance: the trail sat 0.49% under entry. `validate()` refuses both
+the percentage and the ATR form of this mistake.
+
+**Nine symbols, `MAX_OPEN_POSITIONS=5`, `POSITION_NOTIONAL_USDT=1000`.** More
+symbols is the most effective way to get more trades without loosening a
+single rule, and those trades are far less correlated than the extra ones a
+lower threshold on one market would produce. Measured: 3 trades in 41 days on
+the old single-symbol setup, 274 in 31 days here. At most 5,000 USDT is ever
+at work, 10% of the 50,000 demo balance.
 
 **`LEVERAGE=1`.** Leverage does not change position size, only how close
 liquidation sits.
-
-SMA 50/200, RSI 14 with 30/70, and Donchian 20 are left at their textbook
-values.
 
 ## Conventions
 
 Variables lower case, functions camelCase. Secrets never printed: `notify.py`
 scrubs the ntfy topic out of anything heading for a log, because `requests`
 puts the full URL into its exception messages.
+
+`.gitignore` masks `.env.*` as well as `.env`, negating `.env.example` back
+in. Plain `.env` does not cover `.env.backup` or `.env.local`, and this
+repository is public.

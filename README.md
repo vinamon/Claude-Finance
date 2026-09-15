@@ -99,13 +99,22 @@ Nigdy nie commituj tematu ani nie wypisuj go w logach (bot tego nie robi).
 *Settings → Secrets and variables → Actions → Variables*. Cokolwiek ustawisz
 tutaj, nadpisuje `config.py` — możesz przestrajać bota bez commita:
 
-`DUMMY_MODE`, `SYMBOLS`, `STRATEGY`, `POSITION_NOTIONAL_USDT`, `LEVERAGE`,
-`STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`, `TRAILING_STOP_PCT`,
-`TRAILING_ACTIVATION_PCT`, `ENTRY_TIMEFRAME`, `EXIT_TIMEFRAME` (pomiń,
-żeby dziedziczyło po `ENTRY_TIMEFRAME`),
-`SIGNAL_LOOKBACK_BARS`, `SMA_FAST_PERIOD`, `SMA_SLOW_PERIOD`, `RSI_PERIOD`,
-`RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `BREAKOUT_LOOKBACK`,
-`CLOSED_LOOKBACK_MINUTES`.
+Pełna lista z opisem każdego parametru jest w `.env.example` — to jest cały
+panel sterowania bota. **Żaden okres, próg, mnożnik ani przełącznik nie jest
+zaszyty w kodzie**; wszystko przechodzi przez `config.py`, więc zmiana
+zachowania to edycja `.env` i restart, nigdy edycja pliku `.py`.
+
+W skrócie: `DUMMY_MODE`, `AUTOSTART`, `LOOP_INTERVAL_MINUTES`, `SYMBOLS`,
+`STRATEGY`, `ACTIVE_STRATEGIES`, `MIN_ENTRY_VOTES`, `MAX_OPEN_POSITIONS`,
+`POSITION_NOTIONAL_USDT`, `LEVERAGE`, `ENTRY_TIMEFRAME`, `EXIT_TIMEFRAME`
+(pomiń, żeby dziedziczyło), `SIGNAL_LOOKBACK_BARS`, `REGIME_FILTER`,
+`REGIME_PERIOD`, `EXIT_ON_REGIME_BREAK`, `UNKNOWN_OWNER_EXIT`,
+`EMA_FAST_PERIOD`, `EMA_SLOW_PERIOD`, `ADX_PERIOD`, `ADX_MIN`, `RSI_PERIOD`,
+`RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `MEANREV_EXIT_SMA_PERIOD`,
+`BREAKOUT_LOOKBACK`, `BREAKOUT_EXIT_LOOKBACK`, `RISK_MODEL`, `ATR_PERIOD`,
+`ATR_STOP_MULT`, `ATR_TARGET_MULT`, `ATR_TRAIL_MULT`,
+`ATR_TRAIL_ACTIVATION_MULT`, `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`,
+`TRAILING_STOP_PCT`, `TRAILING_ACTIVATION_PCT`, `CLOSED_LOOKBACK_MINUTES`.
 
 `SYMBOLS` jest listą po przecinku, w formacie ccxt:
 `BTC/USDT:USDT,ETH/USDT:USDT`
@@ -192,10 +201,16 @@ wiec nigdy nie trafi do repo.
 
 ### Przelacznik autostartu
 
+> **`AUTOSTART` nie jest autostartem systemu.** Nazwa jest mylaca. Decyduje
+> wylacznie o tym, co robi samo `python run.py`. Nic w tym projekcie nie
+> rejestruje sie w Windowsie ani w macOS — **po restarcie komputera bot sam
+> nie wstanie.** Zeby wstawal, trzeba dopiero dodac skrot w folderze
+> Autostart (`shell:startup`), zadanie w Harmonogramie zadan albo usluge.
+
 | Polecenie | Co robi |
 |---|---|
 | `python run.py` | jeden cykl i koniec |
-| `python run.py --loop` | krazy co 5 minut do Ctrl+C |
+| `python run.py --loop` | krazy co `LOOP_INTERVAL_MINUTES` do Ctrl+C |
 | `python run.py --loop --interval 1` | to samo, co minute |
 | `python run.py --force-entry` | jeden cykl, ktory otwiera pozycje testowa |
 
@@ -207,6 +222,12 @@ AUTOSTART=false     # samo "python run.py" robi jeden cykl
 ```
 
 Flagi z linii polecen zawsze wygrywaja z `.env`.
+
+`LOOP_INTERVAL_MINUTES` mozna zmieniac swobodnie. Decyzje zapadaja na
+**zamknietych** swiecach, wiec czestsze odpytywanie oznacza tylko szybsze
+zauwazenie zamknietego slupka, nigdy inna decyzje. `--interval` przestawia
+przy okazji dlugosc kubelka `orderLinkId`, zeby te dwie rzeczy nie rozjechaly
+sie w czasie.
 
 Harmonogram siedzi w samym skrypcie, nie w cronie ani Harmonogramie zadan
 Windows. Jeden mechanizm zamiast trzech zaleznych od systemu, i widzisz
@@ -242,18 +263,63 @@ nich, moze wisiec dlugo.
 
 ## Strategie
 
-Jedna zmienna decyduje: `STRATEGY = "trend" | "meanrev" | "breakout"`.
-Żaden inny plik się nie zmienia.
+`STRATEGY = "trend" | "meanrev" | "breakout" | "multi"`. Przy `multi` bot
+liczy **wszystkie** strategie z `ACTIVE_STRATEGIES` w każdym cyklu i wchodzi,
+gdy zgodzi się co najmniej `MIN_ENTRY_VOTES` z nich. Żaden inny plik się nie
+zmienia.
 
 | | Wejście | Wyjście | Parametry |
 |---|---|---|---|
-| `trend` | SMA szybka przecina wolną od dołu (złoty krzyż) | szybka poniżej wolnej | `SMA_FAST_PERIOD`, `SMA_SLOW_PERIOD` |
-| `meanrev` | RSI przecina poziom wyprzedania od dołu | RSI osiąga wykupienie | `RSI_PERIOD`, `RSI_OVERSOLD`, `RSI_OVERBOUGHT` |
-| `breakout` | close powyżej maksimum z N świec | close poniżej minimum z N świec | `BREAKOUT_LOOKBACK` |
+| `trend` | EMA szybka przecina wolną od dołu, potwierdzone przez ADX | szybka poniżej wolnej | `EMA_FAST_PERIOD`, `EMA_SLOW_PERIOD`, `ADX_PERIOD`, `ADX_MIN` |
+| `meanrev` | krótkie RSI spada do strefy wyprzedania **w trendzie wzrostowym** | close wraca nad krótką SMA, albo RSI dochodzi do wykupienia | `RSI_PERIOD`, `RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `MEANREV_EXIT_SMA_PERIOD` |
+| `breakout` | close powyżej maksimum z N świec | close poniżej minimum z **M** świec, M < N | `BREAKOUT_LOOKBACK`, `BREAKOUT_EXIT_LOOKBACK` |
 
-> Wszystkie trzy to **podręcznikowe punkty startowe do strojenia, nie strategie
-> z przewagą.** Zakładaj, że każda traci po prowizjach, dopóki twój własny
+> To **podręcznikowe systemy z opublikowaną historią, nie przewagi, które sami
+> odkryliśmy.** Zakładaj, że każda traci po prowizjach, dopóki twój własny
 > backtest nie powie inaczej.
+
+### Filtr reżimu: to on sprawia, że trzy strategie naraz mają sens
+
+Podążanie za trendem i powrót do średniej to filozoficzne przeciwieństwa:
+jedna kupuje siłę, druga słabość. Puszczone obok siebie bez filtra, wejście
+jednej jest wyjściem drugiej.
+
+`REGIME_FILTER` to rozwiązuje. Żadna strategia nie może kupić poniżej wolnej
+średniej `REGIME_PERIOD`, więc powrót do średniej staje się **"kup dołek
+W trendzie wzrostowym"** — czyli tą dobrze udokumentowaną wersją, a nie
+łapaniem spadającego noża. Wszystkie trzy ciągną wtedy w tę samą stronę i
+różnią się tylko tym, co wyzwala wejście.
+
+`EXIT_ON_REGIME_BREAK` domyka to z drugiej strony: gdy cena wraca pod tę
+średnią, pozycja jest zamykana niezależnie od tego, która strategia ją
+otworzyła. Powód, żeby w ogóle być długo, zniknął.
+
+### Kto otwarł pozycję, ten ją zamyka
+
+Bybit w trybie one-way trzyma jedną pozycję na symbol, więc trzy strategie nie
+mogą trzymać trzech pozycji na tym samym rynku. Przy wejściu zapisywane jest
+więc, **która** strategia je otwarła — w `state/owners.json` oraz w
+`orderLinkId`, dzięki czemu widać to także w interfejsie Bybita. Wyjścia
+pilnuje ta sama strategia.
+
+To nie jest kosmetyka. Zmierzone na tym samym wzroście: właściciel `trend`
+trzyma pozycję, a `meanrev` w tej samej chwili wychodzi — bo dla niego odbicie
+już się wydarzyło. Zamykanie pozycji mean-reversion regułą trend-followingu
+psuje obie strategie naraz.
+
+Gdy właściciel jest nieznany (pozycja otwarta ręcznie, plik stanu utracony),
+decyduje `UNKNOWN_OWNER_EXIT`: `any` / `all` / `regime`. Plik stanu jest
+najlepszym staraniem i **nigdy** nie decyduje o tym, czy pozycja istnieje —
+tu jedynym źródłem prawdy pozostaje giełda.
+
+### Model ryzyka: ATR zamiast sztywnych procentów
+
+`RISK_MODEL=atr` wylicza stop, cel i trailing z ATR, czyli z realnej
+zmienności danego instrumentu. Zmierzone na żywo w tej samej chwili: ATR14 to
+0,48% ceny na BTC i 1,02% na XRP — ponad dwukrotna różnica. Sztywne 5% jest
+więc na jednym rynku za ciasne, a na drugim za szerokie, i to rynek decyduje
+na którym. Gdy ATR nie da się policzyć, kod sam wraca do wartości
+procentowych.
 
 **Dlaczego wejścia to zdarzenia, a wyjścia to stany.** Wejście szuka
 *przecięcia* w ostatnich `SIGNAL_LOOKBACK_BARS` zamkniętych świecach — wejście

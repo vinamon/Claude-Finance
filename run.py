@@ -24,12 +24,14 @@ An open position is protected, not managed.
 """
 
 import argparse
+import os
 import sys
 import time
 from datetime import datetime, timedelta
 
 import config
 import main
+import signals
 
 
 def parseArgs():
@@ -114,10 +116,27 @@ def run():
         print("--interval must be at least 1 minute")
         return 2
 
+    # Keep everything downstream agreeing with the interval actually in use.
+    # The order-id bucket in particular is derived from it, and a bucket
+    # longer than the interval blocks a cycle that legitimately wants to
+    # retry. An explicit ORDER_BUCKET_SECONDS is left alone.
+    config.loop_interval_minutes = interval
+    if not os.environ.get("ORDER_BUCKET_SECONDS"):
+        config.order_bucket_seconds = max(60, interval * 60)
+
     print("Claude-Finance runner")
     print("  mode:        %s" % ("loop every %d min" % interval if looping else "single run"))
-    print("  strategy:    %s" % config.strategy)
+    print("  strategy:    %s (%s)"
+          % (config.strategy, ", ".join(signals.activeStrategies()) or "none"))
+    print("  entry vote:  %d of %d strateg(ies) must agree"
+          % (config.min_entry_votes, len(signals.activeStrategies())))
+    print("  regime:      %s"
+          % (("long only above SMA%d" % config.regime_period)
+             if config.regime_filter else "filter OFF"))
+    print("  risk model:  %s" % config.risk_model)
+    print("  timeframe:   entry %s, exit %s" % (config.entry_timeframe, config.exit_timeframe))
     print("  dummy_mode:  %s" % config.dummy_mode)
+    print("  max open:    %s" % (config.max_open_positions or "unlimited"))
     print("  symbols:     %s" % (", ".join(config.symbols) or "(none configured)"))
     if args.force_entry:
         print("  force-entry: yes, first cycle only")
