@@ -1,12 +1,53 @@
 name: trade
 
+# =============================================================================
+# ARCHIVED - this workflow does not run on a schedule any more.
+#
+# WHY. Bybit fronts its API with CloudFront and geo-blocks the country
+# GitHub's runners sit in. Measured, not guessed: the runner reported
+# `Azure Region: eastus`, an IP in Virginia, and all three Bybit hosts
+# returned 403 "configured to block access from your country" on a public,
+# unauthenticated endpoint. No key, permission or retry changes that, and the
+# region of a standard hosted runner cannot be chosen on a free plan.
+#
+# This used to carry `schedule: - cron: "*/5 * * * *"`, which kept firing from
+# the default branch and failing 403 every time. The bot runs from a laptop
+# instead - see run.py and the README.
+#
+# The file is kept, not deleted, because it works unchanged on a machine in a
+# country Bybit serves. `workflow_dispatch` is left in place so it can still
+# be started by hand from the Actions tab.
+#
+# TO REACTIVATE, two things, not one:
+#
+#   1. Put the schedule back:
+#          on:
+#            schedule:
+#              - cron: "*/5 * * * *"
+#            workflow_dispatch:
+#      GitHub only honours a cron that sits on the DEFAULT branch, and treats
+#      it as best effort: runs are routinely late and get dropped entirely
+#      under load. The bot copes (state lives on the exchange, signals scan a
+#      window of bars), but do not expect even spacing.
+#
+#   2. !!! UPDATE THE env: BLOCK BELOW - IT IS OUT OF DATE !!!
+#      It still passes SMA_FAST_PERIOD and SMA_SLOW_PERIOD, which were
+#      retired, and it knows NONE of the settings added in commit 4055141:
+#      ACTIVE_STRATEGIES, MIN_ENTRY_VOTES, MAX_OPEN_POSITIONS, REGIME_FILTER,
+#      REGIME_PERIOD, EXIT_ON_REGIME_BREAK, UNKNOWN_OWNER_EXIT,
+#      EMA_FAST_PERIOD, EMA_SLOW_PERIOD, ADX_PERIOD, ADX_MIN,
+#      MEANREV_EXIT_SMA_PERIOD, BREAKOUT_EXIT_LOOKBACK, RISK_MODEL,
+#      ATR_PERIOD, ATR_STOP_MULT, ATR_TARGET_MULT, ATR_TRAIL_MULT,
+#      ATR_TRAIL_ACTIVATION_MULT.
+#
+#      Started as-is today, the bot would run on half a configuration: the
+#      repository Variables for everything missing would never reach it, and
+#      it would silently fall back to the defaults in config.py. Compare the
+#      list against .env.example, which is the complete control panel, BEFORE
+#      you run this.
+# =============================================================================
+
 on:
-  schedule:
-    # Every 5 minutes. GitHub treats this as best effort, not a promise: runs
-    # are routinely late and get dropped entirely under load. The bot is built
-    # to cope (state lives on the exchange, signals scan a window of bars),
-    # but do not expect even spacing.
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 # Never let two runs trade at the same time.

@@ -91,6 +91,37 @@ serves. `geo-check.yml` re-measures this in 30 seconds. Do not attempt to route
 around the block with a proxy or VPN: it violates Bybit's terms and risks the
 account.
 
+**The workflows are archived, not deleted.** `trade.yml` carried
+`cron: "*/5 * * * *"` and `keepalive.yml` a weekly cron, both sitting on the
+default branch, so GitHub kept starting the bot and kept getting 403. Every
+scheduled `trade` run in the history is a failure. Both now have only
+`workflow_dispatch:`. The files are kept because they work unchanged from a
+country Bybit serves, and each carries a header explaining how to bring it
+back.
+
+Two things a future session must not get wrong here:
+
+**A cron only fires from the default branch.** Removing `schedule:` on a
+working branch changes nothing until it is merged to `main`. Do not report the
+schedule as stopped before that.
+
+**`trade.yml`'s `env:` block is deliberately stale.** It still passes the
+retired `SMA_FAST_PERIOD` / `SMA_SLOW_PERIOD` and knows none of the settings
+added in `4055141`. This was the owner's call: a loud warning in the file
+rather than a list that would silently rot again. Reactivating the workflow
+means updating that block against `.env.example` first - do not treat it as a
+bug to quietly fix, and do not treat it as safe to run as-is.
+
+`keepalive.yml` existed only to stop GitHub disabling `trade.yml`'s cron after
+60 days of repository inactivity. With no cron to protect it protects nothing,
+and it is the only workflow with `contents: write`. Reactivate it only after
+`trade.yml` has a schedule again.
+
+`smoke-test.yml` never had a schedule and is untouched, but its connection
+step returns 403 from a GitHub runner like everything else; the ntfy step
+still works. `geo-check.yml` is untouched and is the one workflow here that is
+still straightforwardly useful.
+
 ## Running it
 
 ```

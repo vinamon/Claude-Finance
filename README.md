@@ -1,7 +1,12 @@
 # Claude-Finance
 
-Bot handlowy na koncie **Bybit Demo Trading**. Python, odpalany z harmonogramu
-GitHub Actions co 5 minut. Wirtualne środki, zero kontaktu z kontem realnym.
+Bot handlowy na koncie **Bybit Demo Trading**. Python, odpalany **lokalnie**
+przez `run.py`. Wirtualne środki, zero kontaktu z kontem realnym.
+
+> Nie chodzi na GitHub Actions i nie może: Bybit blokuje geograficznie kraj,
+> w którym stoją runnery GitHuba. Workflowy zostały **zarchiwizowane** — nadal
+> są w repo i da się je odpalić ręcznie, ale nic nie odpala ich samo.
+> Szczegóły w sekcji *GitHub Actions: dlaczego nie* niżej.
 
 ---
 
@@ -53,7 +58,8 @@ trailing we wczesną stratę, która strzela zanim zadziała stop loss.
 | `main.py` | przebieg: pozycje zamknięte → wyjścia → wejścia |
 | `scripts/test_connection.py` | krok 1: połączenie i saldo demo |
 | `scripts/test_ntfy.py` | krok 2: sam push |
-| `.github/workflows/smoke-test.yml` | kroki 1 i 2 jako przycisk w Actions |
+| `run.py` | runner lokalny, przełącznik pętla/jeden przebieg |
+| `.github/workflows/` | **zarchiwizowane** — bez harmonogramów, tylko ręcznie |
 
 ---
 
@@ -119,58 +125,58 @@ W skrócie: `DUMMY_MODE`, `AUTOSTART`, `LOOP_INTERVAL_MINUTES`, `SYMBOLS`,
 `SYMBOLS` jest listą po przecinku, w formacie ccxt:
 `BTC/USDT:USDT,ETH/USDT:USDT`
 
-### 5. Testy: przyciskiem, bez terminala
+### 5. Testy
 
-Nie potrzebujesz lokalnego klona ani terminala. Workflow **smoke-test** robi
-kroki 1 i 2 za ciebie:
-
-*Actions → smoke-test → Run workflow →* wybierz `both` → *Run*.
-
-Wynik czytasz w logach joba. Klucze nie opuszczają GitHub Secrets. Opcje:
-
-| Wybór | Co sprawdza |
-|---|---|
-| `connection` | połączenie z demo, saldo, specyfikacja twoich symboli |
-| `ntfy` | czy push dociera na telefon |
-| `both` | oba, po kolei |
-
-> `smoke-test` pojawi się w zakładce Actions dopiero, gdy workflow znajdzie się
-> na gałęzi domyślnej. GitHub pokazuje przycisk *Run workflow* wyłącznie dla
-> workflowów z brancha domyślnego. Czyli: najpierw merge, potem przycisk.
-
-<details>
-<summary>Jeśli jednak masz lokalnie gita</summary>
+Lokalnie, w aktywnym venv:
 
 ```bash
-pip install -r requirements.txt
-
-export BYBIT_API_KEY=...
-export BYBIT_API_SECRET=...
-export NTFY_TOPIC=...
-
-python scripts/test_connection.py   # krok 1: saldo demo
+python scripts/test_connection.py   # krok 1: saldo demo, specyfikacja symboli
 python scripts/test_ntfy.py         # krok 2: push na telefon
 ```
 
+`test_connection.py` wypisuje ścieżkę interpretera, diagnozę configu,
+rozwiązany host i przesunięcie zegara, a kody błędów Bybita tłumaczy na
+przyczyny. To pierwsze miejsce, do którego warto zajrzeć, gdy coś nie działa.
+
+<details>
+<summary>Historycznie: workflow smoke-test</summary>
+
+Był to sposób na przetestowanie kluczy przyciskiem, bez terminala. Krok 1
+**zwraca dziś 403** z runnera GitHuba, bo Bybit blokuje geograficznie kraj, w
+którym te runnery stoją — niezależnie od poprawności kluczy. Krok 2 (push
+ntfy) nie dotyka Bybita i nadal działa.
+
+*Actions → smoke-test → Run workflow →* `both` / `connection` / `ntfy`.
+
 </details>
 
-### 6. Pierwszy run z telefonu
+### 6. Pierwszy przebieg
 
-Apka GitHub → repo → **Actions** → workflow **trade** → **Run workflow**.
+```
+python run.py --force-entry
+```
 
-> **Kolejność ma znaczenie.** Zarówno cron, jak i przycisk *Run workflow*
-> działają wyłącznie dla workflowów leżących na gałęzi domyślnej. Zanim
-> cokolwiek odpalisz: ustaw Secrets, potem zmerguj do `main`. Odwrotna
-> kolejność znaczy czerwony run co 5 minut na `CONFIG ERROR`, dopóki nie
-> dosypiesz kluczy. Przy pustym `SYMBOLS` cron kończy się zielono i nic nie
-> robi, więc merge bez ustawionych symboli jest bezpieczny.
-
-Przy `DUMMY_MODE=true` (domyślnie) ten ręczny run **wymusza wejście na każdym
+Przy `DUMMY_MODE=true` (domyślnie) `--force-entry` **wymusza wejście na każdym
 skonfigurowanym symbolu**, ignorując rynek — po to, żeby przepchnąć cały
-pipeline. Runy z crona w dummy mode nie robią nic. Trzy symbole = trzy
-pozycje z jednego kliknięcia, więc na start ustaw jeden.
+pipeline i zobaczyć, że wszystko działa. Dziewięć symboli = dziewięć pozycji
+z jednego polecenia, więc na próbę zostaw w `SYMBOLS` jeden.
+
+Flaga jest **jednorazowa**: w trybie pętli dotyczy tylko pierwszego cyklu.
 
 Kiedy działa: ustaw `DUMMY_MODE=false` i bot zacznie słuchać strategii.
+
+<details>
+<summary>Historycznie: pierwszy run z telefonu przez Actions</summary>
+
+Tą ścieżką **już nie da się handlować** — runnery GitHuba dostają od Bybita
+403. Zostaje w dokumentacji na wypadek, gdyby workflowy kiedyś wróciły do
+użytku na maszynie w kraju, który Bybit obsługuje.
+
+Apka GitHub → repo → **Actions** → workflow **trade** → **Run workflow**.
+Przycisk *Run workflow* działa wyłącznie dla workflowów leżących na gałęzi
+domyślnej, więc najpierw merge, potem przycisk.
+
+</details>
 
 ---
 
@@ -374,14 +380,53 @@ ustaw `NOTIFIED_STATE_FILE=""`.
 
 ---
 
-## Keepalive
+## GitHub Actions: dlaczego nie
+
+Bybit stawia przed swoim API CloudFront i blokuje geograficznie kraj, w
+którym stoją runnery GitHuba. To jest **zmierzone, nie zgadnięte**: runner
+zgłosił `Azure Region: eastus`, IP w Wirginii, a wszystkie trzy hosty Bybita
+(`api-demo`, `api-testnet`, `api.bybit.com`) zwróciły 403 z komunikatem
+*"The Amazon CloudFront distribution is configured to block access from your
+country"* — na publicznym endpoincie, bez żadnego klucza.
+
+Żadna zmiana uprawnień, kluczy ani liczby ponowień tego nie obejdzie. Regionu
+standardowego runnera nie da się wybrać na darmowym planie.
+
+**Nie próbuj obchodzić tego przez proxy ani VPN** — to łamie regulamin Bybita
+i naraża konto.
+
+Dlatego bot chodzi z laptopa, a workflowy zostały zarchiwizowane: nie mają
+już wyzwalacza `schedule:`, została sama możliwość ręcznego odpalenia
+(`workflow_dispatch`). Pliki celowo **nie zostały skasowane** — działają bez
+zmian na maszynie w kraju, który Bybit obsługuje.
+
+| Workflow | Stan |
+|---|---|
+| `trade.yml` | zarchiwizowany. Uwaga: jego lista zmiennych jest nieaktualna, szczegóły w nagłówku pliku |
+| `keepalive.yml` | zarchiwizowany, patrz niżej |
+| `smoke-test.yml` | tylko ręcznie (nigdy nie miał harmonogramu). Krok 1 zwróci 403 |
+| `geo-check.yml` | **bez zmian i nadal użyteczny** — mierzy blokadę w 30 sekund |
+
+Jeśli kiedyś zechcesz je reaktywować, instrukcja krok po kroku siedzi w
+nagłówku każdego pliku.
+
+---
+
+## Keepalive — zarchiwizowany
 
 GitHub wyłącza harmonogramy w repo bez commitów przez 60 dni. Sam fakt, że
 workflow się odpala, tego licznika **nie** resetuje — liczy się aktywność w
-repo. Dlatego `keepalive.yml` raz w tygodniu pushuje pusty commit.
+repo. Dlatego `keepalive.yml` raz w tygodniu pushował pusty commit, żeby
+podtrzymać cron `trade.yml`.
 
-Wymaga, żeby Actions mogło pisać: *Settings → Actions → General → Workflow
-permissions → **Read and write permissions***.
+`trade.yml` nie ma już crona, więc nie ma czego podtrzymywać i keepalive
+został wyłączony. Miał też jako jedyny uprawnienie `contents: write`, czyli
+prawo pisania do repo — zadanie z takim uprawnieniem chodzące w kółko bez
+powodu to niepotrzebne ryzyko.
+
+Reaktywować **wyłącznie** po przywróceniu harmonogramu w `trade.yml`.
+Wymaga wtedy: *Settings → Actions → General → Workflow permissions →
+**Read and write permissions***.
 
 ---
 
