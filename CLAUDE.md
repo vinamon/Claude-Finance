@@ -170,7 +170,7 @@ strategy function is a bug; add the knob to `config.py` instead.
 names live in `config.retired_settings` so a stale key in `.env` is reported
 instead of silently ignored.
 
-## Running three strategies at once
+## Running several strategies at once
 
 `STRATEGY=multi` evaluates every strategy in `ACTIVE_STRATEGIES` each cycle
 and enters when at least `MIN_ENTRY_VOTES` agree. Three things make that
@@ -200,6 +200,98 @@ decides. Same status as `state/notified.json`.
 cannot be honoured while discovering positions symbol by symbol - the count
 would only include symbols already visited. `main.run()` reads them all first,
 then acts, keeping the count current as positions open and close.
+
+## A stop beyond liquidation is not a stop
+
+**The hardest-won fact in this repository.** Leverage puts liquidation roughly
+`100/leverage` percent from entry — 6.67% at 15x. A stop further out than that
+never fires: the exchange closes the position first, takes the whole margin,
+and charges a liquidation fee on top. The risk management the strategy was
+built around simply stops existing.
+
+Caught live, not in theory. ARB opened with a 2×ATR stop 7.07% from entry
+while `liqPrice` sat 5.72% away. The stop could not have worked.
+
+Measured across the forty symbols traded here, 2×ATR runs from **1.24% on BTC
+to 27% on the wildest alt** — a twentyfold spread. No single `LEVERAGE` value
+covers that, which is why the fix is per-trade rather than a smaller number:
+
+- `MAX_STOP_FRACTION_OF_LIQUIDATION` (0.5) caps the stop at half the distance
+  to liquidation. `executor.capStopAtLiquidation()` applies it and the cap is
+  logged whenever it bites.
+- `MIN_STOP_ATR_MULT` (1.0) then **refuses the trade** when the cap has
+  squeezed the stop below one ATR. A stop inside normal bar-to-bar movement is
+  not protection, it is a scheduled exit the next candle triggers by accident.
+  On a symbol whose ATR is 13% of price there is no stop that both fits inside
+  a 15x liquidation and means anything.
+
+Do not "simplify" either of these away, and do not raise `LEVERAGE` without
+re-measuring ATR across the whole symbol list.
+
+## Four strategies on two clocks
+
+`STRATEGY_TIMEFRAMES` gives each strategy its own candle size, so the bot
+holds a swing book and a scalping book at once, in the same cycle, against the
+same account. Three rules read hourly candles; `scalp` reads 15-minute ones.
+
+`scalp` is Bollinger Band reversion: buy a close stretched below the lower
+band, let go when it reverts to the middle. It earns its place because
+standard deviation measures something none of the others do — how far the
+current move sits outside normal variation for that market — which is why the
+same rule works on BTC and on a memecoin without retuning.
+
+**`MAX_OPEN_PER_STRATEGY` is what makes this real rather than nominal.**
+Without it the fast strategy eats every position slot before the slow ones
+reach one: a 15-minute rule across forty symbols fires many times more often
+than an hourly rule, so "fast AND daily" quietly becomes "fast only".
+
+The regime filter is applied **per strategy on its own timeframe**, not once
+globally. On hourly bars the 200-period line is about eight days of trend; on
+15-minute bars about two. A scalper has no business being blocked by an
+eight-day view, and a swing rule has no business being let in by a two-day one.
+
+`signals.requiredTimeframes()` returns one entry per DISTINCT timeframe, so
+three strategies sharing the hourly chart cost one request, not three.
+
+## The symbol list was measured, then filtered by hand
+
+Forty crypto perpetuals, ranked by 24h turnover read straight from the
+exchange. Bybit lists 762 USDT perpetuals, and fetching all of them is not an
+option: one cycle would take about 14 minutes, longer than the candle the
+scalper is meant to catch.
+
+The raw top forty by volume **is not all crypto**. It includes tokenized
+equities and commodities — AAPL, TSLA, MSTR, SOXL, SKHYNIX, XAU, XAG, crude —
+which follow a different clock and a different logic than anything these
+strategies were built for. Nothing in the API metadata distinguishes them:
+`contractType` is `LinearPerpetual` for all of them, `fetch_currencies()`
+returns nothing on the demo host, and they trade 24/7 so a dead-candle test
+does not separate them either. They were excluded by name, and anything whose
+identity was uncertain was left out rather than guessed at.
+
+## One bot can look like two processes
+
+On Windows a virtualenv `python.exe` is a stub that launches the real
+interpreter as its child, so a single `run.py --loop` appears **twice** in the
+process table with an identical command line. Counting raw processes reports
+two bots where there is one, which sent this session hunting for a duplicate
+that did not exist.
+
+`run.botRoots()` drops any process whose parent is also a bot process and is
+what `--kill-all` and the duplicate warning count. `taskkill` is called with
+`/T` so the tree goes together.
+
+A genuine second instance is still a real problem, and it happened here: a
+`--loop` running in one terminal alongside a manual `--once` in another both
+wrote `state/owners.json`, the later write won, and the record of which
+strategy opened a position was lost. The exits then fell back to
+`UNKNOWN_OWNER_EXIT`. Trading stayed correct — the exchange is still the only
+source of truth for what is held — but the strategies were judged by the wrong
+rules.
+
+**A running loop does not pick up edits.** `config.py` and every module are
+imported once when the process starts, so changing `.env` or the code means
+restarting the loop. `--kill-all` then a fresh `run.py --loop`.
 
 ## Parameter choices, and why they are what they are
 

@@ -85,6 +85,33 @@ def envList(name, default):
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def envMap(name, default, cast=str):
+    """Parse "key:value,key:value" into a dict.
+
+    Used where a setting is per-strategy rather than global - a timeframe or a
+    position cap that differs between a scalper and a swing rule. Anything
+    unparseable is skipped rather than crashing the bot at import time, and
+    validate() reports it instead.
+    """
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return dict(default)
+    parsed = {}
+    for item in value.split(","):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        key, _, raw = item.partition(":")
+        key, raw = key.strip(), raw.strip()
+        if not key or not raw:
+            continue
+        try:
+            parsed[key] = cast(raw)
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
 # ---------------------------------------------------------------------------
 # secrets - never hardcode, never log
 # ---------------------------------------------------------------------------
@@ -153,13 +180,44 @@ symbols = envList(
     [
         "BTC/USDT:USDT",
         "ETH/USDT:USDT",
-        "SOL/USDT:USDT",
-        "BNB/USDT:USDT",
         "XRP/USDT:USDT",
+        "SOL/USDT:USDT",
+        "ZEC/USDT:USDT",
+        "HYPE/USDT:USDT",
+        "LSK/USDT:USDT",
         "DOGE/USDT:USDT",
+        "NEAR/USDT:USDT",
+        "ENA/USDT:USDT",
+        "ARB/USDT:USDT",
+        "SUI/USDT:USDT",
         "ADA/USDT:USDT",
-        "AVAX/USDT:USDT",
+        "UNI/USDT:USDT",
+        "1000PEPE/USDT:USDT",
+        "BNB/USDT:USDT",
+        "XLM/USDT:USDT",
         "LINK/USDT:USDT",
+        "PUMPFUN/USDT:USDT",
+        "TAO/USDT:USDT",
+        "AAVE/USDT:USDT",
+        "ONDO/USDT:USDT",
+        "WLD/USDT:USDT",
+        "XPL/USDT:USDT",
+        "AVAX/USDT:USDT",
+        "USELESS/USDT:USDT",
+        "TRUMP/USDT:USDT",
+        "VVV/USDT:USDT",
+        "LTC/USDT:USDT",
+        "OP/USDT:USDT",
+        "FIL/USDT:USDT",
+        "T/USDT:USDT",
+        "XMR/USDT:USDT",
+        "FARTCOIN/USDT:USDT",
+        "HBAR/USDT:USDT",
+        "CVC/USDT:USDT",
+        "APT/USDT:USDT",
+        "INJ/USDT:USDT",
+        "ASTR/USDT:USDT",
+        "BCH/USDT:USDT",
     ],
 )
 
@@ -169,7 +227,28 @@ strategy = envStr("STRATEGY", "multi")
 # Which strategies are live when STRATEGY=multi, in PRIORITY order. When more
 # than one fires on the same bar the first listed owns the position, and its
 # exit rule is what will close it. Ignored unless STRATEGY=multi.
-active_strategies = envList("ACTIVE_STRATEGIES", ["trend", "breakout", "meanrev"])
+active_strategies = envList("ACTIVE_STRATEGIES", ["trend", "breakout", "meanrev", "scalp"])
+
+# Per-strategy timeframe override, as "name:timeframe,name:timeframe".
+# Anything not listed runs on ENTRY_TIMEFRAME.
+#
+# This is what lets one bot hold a swing book and a scalping book at the same
+# time. The three slower rules read hourly candles; "scalp" reads 15-minute
+# ones, sees several times as many bars, and is in and out inside the window
+# a single hourly bar covers.
+strategy_timeframes = envMap("STRATEGY_TIMEFRAMES", {"scalp": "15m"})
+
+# Per-strategy ceiling on open positions, as "name:count". A strategy not
+# listed is limited only by MAX_OPEN_POSITIONS.
+#
+# Without this the fast strategy quietly starves the slow ones. A 15-minute
+# rule across forty symbols fires many times more often than an hourly one, so
+# it reaches every free slot first and the golden cross never gets to trade.
+# Budgeting them separately is what makes "fast AND daily" true rather than
+# "fast, and daily in theory".
+max_open_per_strategy = envMap("MAX_OPEN_PER_STRATEGY",
+                               {"scalp": 6, "trend": 3, "breakout": 3, "meanrev": 3},
+                               int)
 
 # How many active strategies must agree before a position opens. 1 is "any
 # signal trades" and produces the most trades; raising it demands confluence
@@ -179,7 +258,7 @@ min_entry_votes = envInt("MIN_ENTRY_VOTES", 1)
 # Hard ceiling on simultaneous open positions across all symbols, so a market
 # where everything breaks out at once cannot put the whole account to work in
 # one direction. Symbols are considered in SYMBOLS order. 0 disables the cap.
-max_open_positions = envInt("MAX_OPEN_POSITIONS", 5)
+max_open_positions = envInt("MAX_OPEN_POSITIONS", 12)
 
 # ---------------------------------------------------------------------------
 # position size and leverage
@@ -279,6 +358,26 @@ breakout_lookback = envInt("BREAKOUT_LOOKBACK", 20)
 breakout_exit_lookback = envInt("BREAKOUT_EXIT_LOOKBACK", 10)
 
 # ---------------------------------------------------------------------------
+# strategy 4: scalp - Bollinger Band reversion, on a fast timeframe
+# ---------------------------------------------------------------------------
+
+# Bollinger's own bands: a moving average with a channel drawn a number of
+# standard deviations either side of it. Buy a close that has been stretched
+# below the lower band, let go when it has snapped back to the middle.
+#
+# Standard deviation is a genuinely different measure from anything else here
+# - EMA crossovers, RSI and Donchian channels all read price levels, while
+# this reads how FAR the current move sits outside normal variation for this
+# market. 20 and 2.0 are Bollinger's published defaults.
+bb_period = envInt("BB_PERIOD", 20)
+bb_stdev = envFloat("BB_STDEV", 2.0)
+
+# How far back to look for the stretch. Kept short on purpose: on a 15-minute
+# chart a touch of the lower band resolves within a bar or two, so a wide
+# window would re-enter on a move that has already played out.
+bb_lookback_bars = envInt("BB_LOOKBACK_BARS", 2)
+
+# ---------------------------------------------------------------------------
 # risk model - where the stop, target and trail actually go
 # ---------------------------------------------------------------------------
 
@@ -299,6 +398,28 @@ atr_stop_mult = envFloat("ATR_STOP_MULT", 2.0)
 atr_target_mult = envFloat("ATR_TARGET_MULT", 4.0)
 atr_trail_mult = envFloat("ATR_TRAIL_MULT", 1.5)
 atr_trail_activation_mult = envFloat("ATR_TRAIL_ACTIVATION_MULT", 3.0)
+
+# HOW CLOSE THE STOP MAY GET TO THE LIQUIDATION PRICE.
+#
+# Leverage puts liquidation roughly 100/leverage percent from entry - 6.67% at
+# 15x. A stop further away than that never fires: the exchange closes the
+# position first, for the full margin, with a liquidation fee on top, and the
+# risk management the strategy was built around simply stops existing.
+#
+# Measured live across the forty symbols traded here, 2xATR ranges from 1.24%
+# on BTC to 27% on the wildest alt - a twentyfold spread. No single leverage
+# covers that, so the stop is capped per trade instead: it may use at most
+# this fraction of the distance to liquidation.
+max_stop_fraction_of_liquidation = envFloat("MAX_STOP_FRACTION_OF_LIQUIDATION", 0.5)
+
+# WHEN A CAPPED STOP IS TOO TIGHT TO BE WORTH TAKING.
+#
+# Capping protects the position from liquidation, but a stop squeezed inside
+# normal bar-to-bar movement is not protection, it is a guaranteed exit. If
+# the cap pulls the stop below this many ATR, the trade is skipped rather than
+# taken with a stop the next candle will hit by accident. Set to 0 to take
+# every trade regardless.
+min_stop_atr_mult = envFloat("MIN_STOP_ATR_MULT", 1.0)
 
 # Percentage model, and the fallback for the ATR model. Fractions of the entry
 # price: 0.05 == 5%. Set any of them to 0 to disable that leg.
@@ -438,7 +559,7 @@ def validate():
     """Return a list of human-readable configuration problems. Non-empty means
     the run is refused."""
     problems = []
-    known = ("trend", "meanrev", "breakout")
+    known = ("trend", "meanrev", "breakout", "scalp")
 
     if not bybit_api_key or not bybit_api_secret:
         problems.append("BYBIT_API_KEY / BYBIT_API_SECRET are not set")
@@ -474,6 +595,12 @@ def validate():
     if risk_model not in ("atr", "pct"):
         problems.append("RISK_MODEL must be 'atr' or 'pct', got %r" % risk_model)
 
+    if not 0 < max_stop_fraction_of_liquidation <= 1:
+        problems.append(
+            "MAX_STOP_FRACTION_OF_LIQUIDATION must be above 0 and at most 1, got %.4g"
+            % max_stop_fraction_of_liquidation)
+    if min_stop_atr_mult < 0:
+        problems.append("MIN_STOP_ATR_MULT must be >= 0")
     if position_notional_usdt <= 0:
         problems.append("POSITION_NOTIONAL_USDT must be > 0")
     if leverage < 1:
@@ -497,6 +624,24 @@ def validate():
         problems.append("ADX_MIN must be >= 0 (0 disables the filter)")
     if signal_lookback_bars < 1:
         problems.append("SIGNAL_LOOKBACK_BARS must be >= 1")
+    if bb_period < 2:
+        problems.append("BB_PERIOD must be >= 2")
+    if bb_stdev <= 0:
+        problems.append("BB_STDEV must be > 0")
+    if bb_lookback_bars < 1:
+        problems.append("BB_LOOKBACK_BARS must be >= 1")
+    for name in strategy_timeframes:
+        if name not in known:
+            problems.append(
+                "STRATEGY_TIMEFRAMES names unknown strategy %r - valid names are %s"
+                % (name, ", ".join(known)))
+    for name, cap in max_open_per_strategy.items():
+        if name not in known:
+            problems.append(
+                "MAX_OPEN_PER_STRATEGY names unknown strategy %r - valid names are %s"
+                % (name, ", ".join(known)))
+        elif cap < 0:
+            problems.append("MAX_OPEN_PER_STRATEGY for %r must be >= 0" % name)
 
     # A trailing stop whose activation sits below its own distance arms BELOW
     # the entry price, turning profit protection into an early loss. Zero

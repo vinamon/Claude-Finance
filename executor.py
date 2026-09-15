@@ -189,13 +189,25 @@ def computeQty(spec, price, notional_usdt):
     return qty
 
 
+def liquidationDistance(entry_price):
+    """Roughly how far price must move against a long before Bybit closes it.
+
+    Leverage is what decides this: at 15x a 6.67% move against the position
+    consumes the whole margin. The real figure is slightly nearer than that
+    once maintenance margin and fees are counted, which is exactly why the
+    stop is only allowed a FRACTION of this distance rather than all of it.
+    """
+    leverage = max(1, config.leverage)
+    return entry_price / float(leverage)
+
+
 def riskDistances(entry_price, atr_value):
     """How far the stop, target, trail and its activation sit from entry, in
     price units. Returns (distances, model_name).
 
     Two models, chosen by RISK_MODEL:
 
-    "atr" measures everything in the instrument's own recent volatility. Two
+    "atr" measures everything in the recent volatility of the instrument. Two
     ATR is the same amount of risk on BTC as on a small alt, and the same
     amount in a calm week as in a violent one. A flat percentage is neither:
     it is too tight somewhere and too wide somewhere else, and the market
@@ -225,18 +237,46 @@ def riskDistances(entry_price, atr_value):
     }, model
 
 
+def capStopAtLiquidation(distances, entry_price):
+    """Pull the stop inside the liquidation price. Returns a note, or None.
+
+    A STOP BEYOND LIQUIDATION IS NOT A STOP. The exchange closes the position
+    first, takes the whole margin and charges a liquidation fee, and the rule
+    the strategy was built around never gets a say. Measured live on this
+    account: ARB opened with a 2xATR stop 7.07% away while liquidation sat
+    5.72% away, so the stop could not have fired.
+
+    Volatility across a forty-symbol list spans a factor of twenty - 2xATR is
+    1.24% on BTC and 27% on the wildest alt - so no single leverage setting
+    makes every symbol safe. Capping per trade does.
+    """
+    limit = liquidationDistance(entry_price) * config.max_stop_fraction_of_liquidation
+    if distances["stop"] <= limit:
+        return None
+    original = distances["stop"]
+    distances["stop"] = limit
+    return ("stop capped from %.2f%% to %.2f%% of entry: liquidation sits %.2f%% away at %dx "
+            "and MAX_STOP_FRACTION_OF_LIQUIDATION allows half of that"
+            % (100.0 * original / entry_price,
+               100.0 * limit / entry_price,
+               100.0 * liquidationDistance(entry_price) / entry_price,
+               max(1, config.leverage)))
+
+
 def exitPrices(spec, entry_price, atr_value=None):
     """Stop loss / take profit prices and the trailing distance, for a long.
 
-    trailing_distance is a PRICE DISTANCE, not a percentage: Bybit's v5 docs
+    trailing_distance is a PRICE DISTANCE, not a percentage: the Bybit v5 docs
     define trailingStop as "Trailing stop by price distance". Sending 1.5
     meaning "1.5%" would actually ask for a 1.5 USDT trail, which on BTC is a
     stop roughly at the current price.
     """
     tick = spec["tick_size"]
     distances, model = riskDistances(entry_price, atr_value)
+    capped = capStopAtLiquidation(distances, entry_price)
     prices = {"stop_loss": None, "take_profit": None, "trailing_distance": None,
-              "trailing_activation": None, "risk_model": model}
+              "trailing_activation": None, "risk_model": model, "capped": capped,
+              "stop_distance": distances["stop"]}
 
     if distances["stop"] > 0:
         # round DOWN so the stop sits at or slightly further from entry, never
@@ -270,6 +310,28 @@ def exitPrices(spec, entry_price, atr_value=None):
             )
 
     return prices
+
+
+def stopTooTight(targets, atr_value):
+    """(too_tight, reason). A capped stop inside normal noise is not worth taking.
+
+    Capping keeps the position clear of liquidation, but squeezing the stop
+    inside ordinary bar-to-bar movement turns it from protection into a
+    scheduled exit - the next candle hits it by accident. On a symbol whose
+    ATR is 13% of price, no stop that fits inside a 15x liquidation is far
+    enough away to mean anything, and the honest answer is to skip the trade.
+    """
+    if not config.min_stop_atr_mult or not atr_value or atr_value <= 0:
+        return False, ""
+    if not targets.get("capped"):
+        return False, ""
+    multiple = targets["stop_distance"] / atr_value
+    if multiple >= config.min_stop_atr_mult:
+        return False, ""
+    return True, ("after capping, the stop would sit %.2f ATR from entry, under the "
+                  "MIN_STOP_ATR_MULT floor of %.2f. At %dx leverage there is no room "
+                  "on this symbol for a stop wide enough to survive normal movement."
+                  % (multiple, config.min_stop_atr_mult, max(1, config.leverage)))
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +440,16 @@ def execute(client, symbol, decision, price, log, atr_value=None):
     # even for the round trip of a second API call.
 
     targets = exitPrices(spec, price, atr_value)
+
+    if targets["capped"]:
+        log("%s: %s" % (symbol, targets["capped"]))
+    too_tight, why = stopTooTight(targets, atr_value)
+    if too_tight:
+        # Not an error and not a failed run: this is a risk decision, and a
+        # skipped trade is a correct outcome worth seeing in the log.
+        log("%s: no entry - %s" % (symbol, why))
+        return {"opened": False, "reason": why, "skipped_for_risk": True}
+
     order_link_id = buildOrderLinkId(spec["market_id"], decision.strategy)
 
     params = {
