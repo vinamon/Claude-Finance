@@ -281,6 +281,44 @@ def adx(candles, period):
     return wilderSmooth(dx, period), plus_di, minus_di
 
 
+def stdev(values, period):
+    """Population standard deviation over a rolling window, aligned to values.
+
+    Population rather than sample, because that is what Bollinger bands use
+    and what every charting package draws. The sample form would widen every
+    band slightly and quietly shift every signal.
+    """
+    out = [None] * len(values)
+    if period <= 0 or len(values) < period:
+        return out
+    for i in range(period - 1, len(values)):
+        window = values[i - period + 1:i + 1]
+        mean = sum(window) / period
+        variance = sum((value - mean) ** 2 for value in window) / period
+        out[i] = variance ** 0.5
+    return out
+
+
+def bollinger(values, period, deviations):
+    """(middle, upper, lower) bands, each aligned to values.
+
+    The middle band is a simple moving average; the outer two sit a number of
+    standard deviations either side, so they widen when the market gets
+    volatile and tighten when it calms down. That self-scaling is the point:
+    "unusually far from normal" means the same thing on BTC and on a memecoin.
+    """
+    middle = sma(values, period)
+    spread = stdev(values, period)
+    upper = [None] * len(values)
+    lower = [None] * len(values)
+    for i in range(len(values)):
+        if middle[i] is None or spread[i] is None:
+            continue
+        upper[i] = middle[i] + deviations * spread[i]
+        lower[i] = middle[i] - deviations * spread[i]
+    return middle, upper, lower
+
+
 def crossedAbove(fast, slow, index):
     """True if fast crossed from at-or-below to above slow at `index`."""
     if index < 1:
@@ -645,6 +683,103 @@ def breakoutExit(candles):
 
 
 # ---------------------------------------------------------------------------
+# strategy 4: scalp - Bollinger Band reversion on a fast timeframe
+#
+# Bollinger bands are a moving average with a channel drawn BB_STDEV standard
+# deviations either side. Buy a close stretched below the lower band, let go
+# once it has snapped back to the middle. That is the published use of the
+# indicator, not an invention.
+#
+# It earns its place next to the other three by measuring something none of
+# them measure. EMA crossovers, RSI and Donchian channels all read where price
+# IS; standard deviation reads how far the current move sits outside normal
+# variation for this market, which is why the same rule works on BTC and on a
+# memecoin without retuning.
+#
+# It is the fast book. STRATEGY_TIMEFRAMES puts it on 15-minute candles while
+# the other three stay hourly, so it takes several trades inside the window a
+# single hourly bar covers - and MAX_OPEN_PER_STRATEGY stops it eating every
+# position slot before the slow rules can reach one.
+#
+# Honest caveat: a target measured in fractions of a percent is where fees
+# stop being a rounding error. At 4xATR on 15-minute candles the target is
+# roughly 1-2%, against about 0.11% for a taker round trip. Survivable, but
+# not free - and the reason this is not on 5-minute candles.
+# ---------------------------------------------------------------------------
+
+
+def scalpEntry(candles):
+    price = closes(candles)
+    need = config.bb_period + config.bb_lookback_bars + 2
+    if len(price) < need:
+        return Decision(hold, "scalp: need %d closed candles, have %d" % (need, len(price)),
+                        "scalp")
+
+    middle, upper, lower = bollinger(price, config.bb_period, config.bb_stdev)
+    if lower[-1] is None or middle[-1] is None:
+        return Decision(hold, "scalp: bands not seeded yet", "scalp")
+
+    # A short window, not a state. A band touch on a 15-minute chart resolves
+    # within a bar or two, so reading it as a state - or scanning a wide
+    # window - would re-enter on a move that has already finished.
+    for i in lookbackRange(len(price), config.bb_lookback_bars):
+        if lower[i] is None or middle[i] is None or price[i] >= lower[i]:
+            continue
+        # Only while price has not already recovered to the middle band. That
+        # is this strategy's own exit, and entering on top of it would open a
+        # trade that the very next cycle closes.
+        if price[-1] >= middle[-1]:
+            continue
+        bars_ago = len(price) - 1 - i
+        stretch = 100.0 * (middle[i] - price[i]) / middle[i] if middle[i] else 0.0
+        return Decision(
+            buy,
+            "scalp: close broke below the lower Bollinger band %d bar(s) ago, %.2f%% under "
+            "the %d-bar mean (close=%.6f lower=%.6f middle=%.6f)"
+            % (bars_ago, stretch, config.bb_period, price[i], lower[i], middle[i]),
+            "scalp",
+        )
+
+    return Decision(
+        hold,
+        "scalp: no close below the lower Bollinger band in the last %d bar(s) "
+        "(close=%.6f lower=%s middle=%s)"
+        % (config.bb_lookback_bars, price[-1], formatValue(lower[-1]), formatValue(middle[-1])),
+        "scalp",
+    )
+
+
+def scalpExit(candles):
+    price = closes(candles)
+    need = config.bb_period + 2
+    if len(price) < need:
+        return Decision(hold, "scalp exit: need %d closed candles, have %d" % (need, len(price)),
+                        "scalp")
+
+    middle, upper, lower = bollinger(price, config.bb_period, config.bb_stdev)
+    if middle[-1] is None:
+        return Decision(hold, "scalp exit: bands not seeded yet", "scalp")
+
+    # Reversion to the mean IS the trade. Once price is back at the middle
+    # band the reason for being in it has been paid out, and holding on turns
+    # a mean-reversion trade into a directional bet it was never sized for.
+    if price[-1] >= middle[-1]:
+        return Decision(
+            close,
+            "scalp exit: close %.6f reverted to the %d-bar mean %.6f, the stretch is paid out"
+            % (price[-1], config.bb_period, middle[-1]),
+            "scalp",
+        )
+
+    return Decision(
+        hold,
+        "scalp exit: close %.6f still below the %d-bar mean %.6f"
+        % (price[-1], config.bb_period, middle[-1]),
+        "scalp",
+    )
+
+
+# ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
 
@@ -652,6 +787,7 @@ strategies = {
     "trend": (trendEntry, trendExit),
     "meanrev": (meanrevEntry, meanrevExit),
     "breakout": (breakoutEntry, breakoutExit),
+    "scalp": (scalpEntry, scalpExit),
 }
 
 multi = "multi"
@@ -660,21 +796,89 @@ multi = "multi"
 def activeStrategies():
     """Which strategies are live this run, in priority order.
 
-    Priority matters: when several fire on the same bar the first one owns the
-    position and its exit rule is the one that will close it. Order is exactly
-    the order written in ACTIVE_STRATEGIES.
+    Priority matters: when several fire on the same bar, the first one owns
+    the position and its exit rule is the one that will close it. Order is
+    exactly the order written in ACTIVE_STRATEGIES.
     """
     if config.strategy != multi:
         return [config.strategy]
     return [name for name in config.active_strategies if name in strategies]
 
 
-def evaluateEntries(bars):
-    """Run every active strategy's entry rule. Returns a list of Decisions,
-    one per strategy, in priority order. Nothing is filtered out - the caller
-    logs all of them, because a strategy explaining why it did NOT fire is
-    most of the value of the log."""
-    return [strategies[name][0](bars) for name in activeStrategies()]
+def strategyTimeframe(name):
+    """The candle size this strategy is evaluated on.
+
+    STRATEGY_TIMEFRAMES overrides ENTRY_TIMEFRAME per strategy, which is what
+    lets one bot hold a swing book and a scalping book at once: the slow rules
+    read hourly candles while "scalp" reads 15-minute ones, in the same cycle,
+    against the same account.
+    """
+    return config.strategy_timeframes.get(name, config.entry_timeframe)
+
+
+def requiredTimeframes():
+    """Map of timeframe to how many candles to fetch, for everything active.
+
+    One entry per DISTINCT timeframe, not per strategy, so three strategies
+    sharing the hourly chart cost one request rather than three. The count is
+    the largest any strategy on that timeframe needs.
+    """
+    wanted = {}
+    for name in activeStrategies():
+        timeframe = strategyTimeframe(name)
+        wanted[timeframe] = max(wanted.get(timeframe, 0), requiredCandles(name))
+    if not wanted:
+        wanted[config.entry_timeframe] = requiredCandles()
+    return wanted
+
+
+def exitTimeframes(owner):
+    """Timeframes needed to judge an exit on a position held by this owner."""
+    if owner in strategies:
+        names = [owner]
+    else:
+        names = activeStrategies() or [config.strategy]
+    wanted = {}
+    for name in names:
+        if name not in strategies:
+            continue
+        timeframe = config.strategy_timeframes.get(name, config.exit_timeframe)
+        wanted[timeframe] = max(wanted.get(timeframe, 0), requiredCandles(name))
+    return wanted or {config.exit_timeframe: requiredCandles()}
+
+
+def barsFor(name, candles_by_timeframe, fallback=None):
+    """Closed candles on the timeframe this strategy runs on."""
+    timeframe = config.strategy_timeframes.get(name, fallback or config.entry_timeframe)
+    return closedCandles(candles_by_timeframe.get(timeframe) or [])
+
+
+def evaluateEntries(candles_by_timeframe):
+    """Every active entry rule, each evaluated on its own timeframe.
+
+    The regime gate is applied per strategy rather than once globally, because
+    each strategy reads it on the candles it actually trades: on hourly bars
+    the 200-period line is about eight days of trend, on 15-minute bars about
+    two. A scalper has no business being blocked by an eight-day view, and a
+    swing rule has no business being let in by a two-day one.
+
+    Returns one Decision per strategy, nothing filtered out - a strategy
+    explaining why it did NOT fire is most of the value of the log.
+    """
+    decisions = []
+    for name in activeStrategies():
+        bars = barsFor(name, candles_by_timeframe)
+        if not bars:
+            decisions.append(Decision(
+                hold, "%s: no candles on %s" % (name, strategyTimeframe(name)), name))
+            continue
+        allowed, regime_reason = regimeState(bars)
+        if not allowed:
+            decisions.append(Decision(
+                hold, "%s [%s]: %s" % (name, strategyTimeframe(name), regime_reason), name))
+            continue
+        decisions.append(strategies[name][0](bars))
+    return decisions
 
 
 # ---------------------------------------------------------------------------
@@ -682,38 +886,34 @@ def evaluateEntries(bars):
 # ---------------------------------------------------------------------------
 
 
-def entrySignal(symbol, candles):
+def entrySignal(symbol, candles_by_timeframe):
     """Decide whether to open a position. Returns a Decision of buy or hold.
 
-    In multi-strategy mode every active strategy votes and the position opens
-    when at least config.min_entry_votes of them say buy. The returned
-    Decision carries `strategy` (the highest-priority voter, which owns the
-    exit) and `votes` (everyone who agreed).
+    The argument maps a timeframe to that timeframe raw ccxt rows;
+    requiredTimeframes() says which ones to fetch.
+
+    Every active strategy votes and the position opens when at least
+    config.min_entry_votes of them say buy. The returned Decision carries the
+    highest-priority voter as its strategy, which is what will own the exit,
+    plus the full list of who agreed.
 
     In dummy_mode the market is ignored completely: buy only on an explicit
-    --force-entry or a GitHub workflow_dispatch run. That lets you prove the
-    whole pipeline works without a signal ever firing.
+    --force-entry or a GitHub workflow_dispatch run.
     """
+    live = activeStrategies()
     if config.dummy_mode:
+        owner = live[0] if live else None
         if config.force_entry:
-            return Decision(buy, "dummy_mode: --force-entry given, forcing a test entry",
-                            activeStrategies()[0] if activeStrategies() else None)
+            return Decision(buy, "dummy_mode: --force-entry given, forcing a test entry", owner)
         if config.github_event_name == "workflow_dispatch":
-            return Decision(buy, "dummy_mode: manual run, forcing a test entry",
-                            activeStrategies()[0] if activeStrategies() else None)
+            return Decision(buy, "dummy_mode: manual run, forcing a test entry", owner)
         return Decision(
             hold,
             "dummy_mode: triggered by %r without --force-entry, so no entry"
             % config.github_event_name,
         )
 
-    bars = closedCandles(candles)
-
-    regime_ok, regime_reason = regimeState(bars)
-    if not regime_ok:
-        return Decision(hold, regime_reason)
-
-    decisions = evaluateEntries(bars)
+    decisions = evaluateEntries(candles_by_timeframe)
     voters = [decision for decision in decisions if decision.action == buy]
     names = [decision.strategy for decision in voters]
 
@@ -724,26 +924,26 @@ def entrySignal(symbol, candles):
         else:
             summary = "no strategy fired"
         detail = " | ".join(decision.reason for decision in decisions)
-        return Decision(hold, "%s. %s. %s" % (summary, regime_reason, detail))
+        return Decision(hold, "%s. %s" % (summary, detail))
 
     owner = voters[0]
     return Decision(
         buy,
-        "%s [%s] (%s; %d/%d vote(s): %s)"
-        % (owner.reason, owner.strategy, regime_reason, len(voters),
-           config.min_entry_votes, ", ".join(names)),
+        "%s [%s on %s] (%d/%d vote(s): %s)"
+        % (owner.reason, owner.strategy, strategyTimeframe(owner.strategy),
+           len(voters), config.min_entry_votes, ", ".join(names)),
         owner.strategy,
         names,
     )
 
 
-def exitSignal(symbol, candles, owner=None):
+def exitSignal(symbol, candles_by_timeframe, owner=None):
     """Decide whether to close an open position. Returns close or hold.
 
-    `owner` is the strategy that opened this position, remembered from the
-    entry. Its exit rule is the one that applies: closing a mean-reversion
-    trade on a trend-following rule, or the reverse, is how a multi-strategy
-    bot destroys both strategies at once.
+    The owner is the strategy that opened this position, remembered from the
+    entry. Its exit rule is the one that applies, read on its own timeframe:
+    closing a 15-minute mean-reversion trade with an hourly trend rule, or the
+    reverse, is how a multi-strategy bot destroys both strategies at once.
 
     If the owner is unknown - a position opened by hand, or state lost - the
     fallback is config.unknown_owner_exit: "any" closes as soon as any active
@@ -753,27 +953,33 @@ def exitSignal(symbol, candles, owner=None):
     Not short-circuited by dummy_mode: a dummy position is a real demo
     position, and watching the exit rule work is the point of testing it.
     """
-    bars = closedCandles(candles)
+    live = activeStrategies()
+    known_owner = owner in strategies and (config.strategy != multi or owner in live)
 
-    # The regime break applies to every position regardless of owner: if the
-    # market is no longer one we would buy in, there is no strategy-specific
-    # reason to stay long.
+    # The regime break applies to every position regardless of owner, and is
+    # judged on the timeframe of the owner so a scalp is not held open by an
+    # eight-day view it never traded on.
+    judge = owner if known_owner else (live[0] if live else config.strategy)
+    bars = barsFor(judge, candles_by_timeframe, config.exit_timeframe)
     broken, regime_reason = regimeBroken(bars)
     if broken:
         return Decision(close, regime_reason, owner)
 
-    live = activeStrategies()
-
-    if owner in strategies and (config.strategy != multi or owner in live):
+    if known_owner:
         decision = strategies[owner][1](bars)
-        return Decision(decision.action, "%s [owner]" % decision.reason, owner)
+        return Decision(decision.action, "%s [owner, %s]"
+                        % (decision.reason, strategyTimeframe(owner)), owner)
 
     if config.strategy != multi:
         decision = strategies[config.strategy][1](bars)
         return Decision(decision.action, decision.reason, config.strategy)
 
     # Owner unknown or no longer active.
-    decisions = [strategies[name][1](bars) for name in live]
+    decisions = []
+    for name in live:
+        name_bars = barsFor(name, candles_by_timeframe, config.exit_timeframe)
+        if name_bars:
+            decisions.append(strategies[name][1](name_bars))
     wants_out = [decision for decision in decisions if decision.action == close]
     detail = " | ".join(decision.reason for decision in decisions)
     note = "owner unknown (%r), falling back to UNKNOWN_OWNER_EXIT=%s" % (
@@ -789,40 +995,45 @@ def exitSignal(symbol, candles, owner=None):
 
 def atrValue(candles):
     """Latest ATR reading, or None. Used by the risk layer to size stops in
-    the instrument's own volatility rather than a flat percentage."""
+    the volatility of the instrument rather than a flat percentage.
+
+    Feed it the candles of the strategy that is opening the trade: a stop
+    sized from hourly volatility would be several times too wide for a
+    15-minute scalp, and would sit far outside the move it is protecting.
+    """
     bars = closedCandles(candles)
     if len(bars) < config.atr_period + 2:
         return None
     return atr(bars, config.atr_period)[-1]
 
 
-def requiredCandles():
-    """How many candles to request so every active strategy AND the regime
-    filter can be computed.
+def requiredCandles(name=None):
+    """How many candles one strategy needs, or the most any active one needs.
 
     Asks for generous headroom - Bybit serves up to 1000 per request and the
     extra bars cost nothing. Wilder-smoothed indicators in particular are
     recursive and only settle after several times their period, so the warmup
     multiplier is deliberately fat.
     """
-    needs = [config.candle_floor]
+    names = [name] if name in strategies else activeStrategies()
+    needs = [config.candle_floor, config.atr_period * config.warmup_multiplier + 5]
 
     if config.regime_filter:
         needs.append(config.regime_period + config.signal_lookback_bars + 5)
 
-    for name in activeStrategies():
-        if name == "trend":
+    for strategy_name in names:
+        if strategy_name == "trend":
             needs.append(config.ema_slow_period * config.warmup_multiplier
                          + config.signal_lookback_bars + 5)
             needs.append(config.adx_period * config.warmup_multiplier * 2
                          + config.signal_lookback_bars + 5)
-        elif name == "meanrev":
+        elif strategy_name == "meanrev":
             needs.append(config.rsi_period * config.warmup_multiplier
                          + config.meanrev_exit_sma_period + config.signal_lookback_bars + 5)
-        elif name == "breakout":
+        elif strategy_name == "breakout":
             needs.append(max(config.breakout_lookback, config.breakout_exit_lookback)
                          + config.signal_lookback_bars + 5)
-
-    needs.append(config.atr_period * config.warmup_multiplier + 5)
+        elif strategy_name == "scalp":
+            needs.append(config.bb_period * 3 + config.bb_lookback_bars + 5)
 
     return min(config.candle_ceiling, max(needs))

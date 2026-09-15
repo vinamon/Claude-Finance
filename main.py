@@ -5,20 +5,34 @@ Shape of a run:
   1. validate config, build a demo-pinned Bybit client
   2. report positions Bybit closed recently (SL/TP/trailing/liquidation fills
      that happened while nothing was running)
-  3. read what is actually held, once per symbol, before deciding anything
-  4. for each symbol holding a position: check the owning strategy's exit rule
-  5. for each symbol holding nothing: collect every active strategy's vote
+  3. read what is actually held, in ONE request, before deciding anything
+  4. for each symbol holding a position: check the owning strategy exit rule
+  5. for each symbol holding nothing: collect every active strategy vote
   6. log every decision and why, then exit 0, or exit 1 on a real failure
 
 Exiting non-zero matters: a red run is the cheapest monitoring you will get.
 
 WHY POSITIONS ARE READ IN A SEPARATE PASS FIRST
 -----------------------------------------------
-MAX_OPEN_POSITIONS caps how much of the account can be at work at once. To
-honour it, the run has to know how many positions exist BEFORE it decides
-whether symbol number three may open one - otherwise it counts only the
-symbols it happens to have visited already and blows straight through the cap.
-The count is then kept up to date as positions open and close within the run.
+MAX_OPEN_POSITIONS and MAX_OPEN_PER_STRATEGY cap how much of the account can
+be at work at once. To honour either, the run has to know what is already held
+BEFORE it decides whether symbol number three may open something - otherwise
+it counts only the symbols it happens to have visited and walks through the
+cap. The counts are then kept current as positions open and close within the
+run.
+
+Bybit answers "what do I hold" for every linear position in a single request,
+which matters now that the symbol list is forty long: one call instead of
+forty. The per-symbol path is kept as a fallback because a silent failure here
+would make the bot think it is flat and open duplicates.
+
+SEVERAL TIMEFRAMES IN ONE CYCLE
+-------------------------------
+Strategies no longer share one candle size. signals.requiredTimeframes() says
+which timeframes the active set needs and how much history each wants, and
+this module fetches exactly those - one request per distinct timeframe per
+symbol, not one per strategy. That is what lets the hourly swing rules and the
+15-minute scalper run against the same account in the same pass.
 
 SCHEDULING REALITY
 ------------------
@@ -165,8 +179,79 @@ def toFloat(value):
 
 
 # ---------------------------------------------------------------------------
+# reading what is held
+# ---------------------------------------------------------------------------
+
+
+def readPositions(client, symbols):
+    """symbol -> position dict, or None. One request for the whole account.
+
+    Bybit returns every linear position for a settle coin in one response, so
+    forty symbols cost one call rather than forty. The per-symbol loop is kept
+    as a fallback and is genuinely needed: if this silently returned nothing
+    on error, the bot would believe it is flat everywhere and open a second
+    position on top of every one it already holds.
+    """
+    held = dict.fromkeys(symbols)
+    try:
+        rows = client.fetch_positions(
+            None, params={"category": config.category, "settleCoin": "USDT"})
+    except Exception as error:
+        log("batch position read failed (%s), falling back to one call per symbol" % error)
+        for symbol in symbols:
+            held[symbol] = executor.openPosition(client, symbol)
+        return held
+
+    wanted = set(symbols)
+    for row in rows:
+        symbol = row.get("symbol")
+        if symbol not in wanted:
+            continue
+        if executor.positionSize(row) > 0:
+            held[symbol] = row
+    return held
+
+
+def openCounts(held, owners):
+    """How many positions each strategy currently holds."""
+    counts = {}
+    for symbol, position in held.items():
+        if position is None:
+            continue
+        owner = owners.get(symbol)
+        if owner:
+            counts[owner] = counts.get(owner, 0) + 1
+    return counts
+
+
+def mayOpen(strategy, open_total, counts):
+    """(allowed, reason) for one strategy wanting one more position."""
+    if config.max_open_positions and open_total >= config.max_open_positions:
+        return False, ("MAX_OPEN_POSITIONS=%d reached (%d open)"
+                       % (config.max_open_positions, open_total))
+    cap = config.max_open_per_strategy.get(strategy)
+    if cap is not None and counts.get(strategy, 0) >= cap:
+        return False, ("MAX_OPEN_PER_STRATEGY for %s is %d and %d are already open"
+                       % (strategy, cap, counts.get(strategy, 0)))
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 # per-symbol work
 # ---------------------------------------------------------------------------
+
+
+def fetchCandles(client, symbol, wanted):
+    """Fetch each requested timeframe once. wanted maps timeframe -> limit."""
+    candles = {}
+    for timeframe, limit in wanted.items():
+        candles[timeframe] = client.fetch_ohlcv(
+            symbol,
+            timeframe=timeframe,
+            limit=limit,
+            params={"category": config.category},
+        )
+    return candles
 
 
 def handleHeld(client, symbol, position, owners):
@@ -176,12 +261,7 @@ def handleHeld(client, symbol, position, owners):
     log("%s: holding %s contracts, opened by %s, checking its exit rule"
         % (symbol, size, owner or "an unknown rule"))
 
-    candles = client.fetch_ohlcv(
-        symbol,
-        timeframe=config.exit_timeframe,
-        limit=signals.requiredCandles(),
-        params={"category": config.category},
-    )
+    candles = fetchCandles(client, symbol, signals.exitTimeframes(owner))
     decision = signals.exitSignal(symbol, candles, owner)
 
     if decision.action == signals.close:
@@ -196,40 +276,43 @@ def handleHeld(client, symbol, position, owners):
     return {"held": True, "reason": decision.reason}
 
 
-def handleFlat(client, symbol, owners, may_open):
-    """A symbol we are flat on: collect every active strategy's vote."""
-    candles = client.fetch_ohlcv(
-        symbol,
-        timeframe=config.entry_timeframe,
-        limit=signals.requiredCandles(),
-        params={"category": config.category},
-    )
-    closed = signals.closedCandles(candles)
-    if not closed:
-        log("%s: no closed candles returned, skipping" % symbol)
+def handleFlat(client, symbol, owners, open_total, counts):
+    """A symbol we are flat on: collect every active strategy vote."""
+    candles = fetchCandles(client, symbol, signals.requiredTimeframes())
+    if not any(candles.values()):
+        log("%s: no candles returned, skipping" % symbol)
         return {"opened": False, "reason": "no candle data"}
-
-    last_close = closed[-1][4]
-    log(
-        "%s: flat. %d candle(s) on %s, last closed candle %.6f"
-        % (symbol, len(closed), config.entry_timeframe, last_close)
-    )
 
     decision = signals.entrySignal(symbol, candles)
 
-    # The cap is checked AFTER the signal so the log still records what the
+    if decision.action != signals.buy:
+        log("%s: no entry - %s" % (symbol, decision.reason))
+        return {"opened": False, "reason": decision.reason}
+
+    # The caps are checked AFTER the signal so the log still records what the
     # strategies wanted. A blocked entry you cannot see in the log is a
     # strategy you cannot evaluate later.
-    if decision.action == signals.buy and not may_open:
-        reason = (
-            "MAX_OPEN_POSITIONS=%d reached, so this signal is skipped: %s"
-            % (config.max_open_positions, decision.reason)
-        )
+    allowed, why = mayOpen(decision.strategy, open_total, counts)
+    if not allowed:
+        reason = "%s, so this signal is skipped: %s" % (why, decision.reason)
         log("%s: no entry - %s" % (symbol, reason))
         return {"opened": False, "reason": reason, "capped": True}
 
+    # Price and volatility both come from the timeframe the OWNING strategy
+    # trades. A stop sized from hourly candles would be several times too wide
+    # for a 15-minute scalp and would sit outside the move it is protecting.
+    timeframe = signals.strategyTimeframe(decision.strategy)
+    bars = signals.closedCandles(candles.get(timeframe) or [])
+    if not bars:
+        log("%s: no closed candles on %s, skipping" % (symbol, timeframe))
+        return {"opened": False, "reason": "no closed candles on %s" % timeframe}
+
+    last_close = bars[-1][4]
+    log("%s: flat, %d closed candle(s) on %s, last close %.6f"
+        % (symbol, len(bars), timeframe, last_close))
+
     result = executor.execute(
-        client, symbol, decision, last_close, log, signals.atrValue(candles)
+        client, symbol, decision, last_close, log, signals.atrValue(candles.get(timeframe) or [])
     )
     if result.get("opened"):
         owners[symbol] = result.get("strategy")
@@ -253,20 +336,19 @@ def run():
         log("CONFIG WARNING: %s" % note)
 
     live = signals.activeStrategies()
+    books = ", ".join("%s@%s" % (name, signals.strategyTimeframe(name)) for name in live)
     log(
         "start: strategy=%s (%s) votes=%d/%d regime=%s risk=%s dummy_mode=%s "
-        "trigger=%s entry_tf=%s exit_tf=%s symbols=%d max_open=%s"
+        "trigger=%s symbols=%d max_open=%s"
         % (
             config.strategy,
-            ", ".join(live) or "none",
+            books or "none",
             config.min_entry_votes,
             len(live),
             ("SMA%d" % config.regime_period) if config.regime_filter else "off",
             config.risk_model,
             config.dummy_mode,
             config.github_event_name,
-            config.entry_timeframe,
-            config.exit_timeframe,
             len(config.symbols),
             config.max_open_positions or "unlimited",
         )
@@ -281,7 +363,7 @@ def run():
 
     client = buildExchange()
     client.load_markets()
-    # implode_hostname resolves ccxt's {hostname} template; printing it raw
+    # implode_hostname resolves the ccxt hostname template; printing it raw
     # makes the one line that confirms the demo host look broken.
     log(
         "connected to Bybit demo trading (%s), %s"
@@ -304,16 +386,7 @@ def run():
 
     # Pass one: what do we actually hold. See the module docstring for why
     # this cannot be folded into the loop below.
-    held = {}
-    for symbol in config.symbols:
-        try:
-            held[symbol] = executor.openPosition(client, symbol)
-        except Exception as error:
-            log("%s: could not read position (%s)" % (symbol, error))
-            failures.append("%s: reading position: %s" % (symbol, error))
-
-    open_count = sum(1 for position in held.values() if position is not None)
-    log("holding %d position(s) across %d symbol(s)" % (open_count, len(config.symbols)))
+    held = readPositions(client, config.symbols)
 
     # Owners recorded for symbols we no longer hold are stale - the position
     # was closed by an exchange-side stop while nothing was running.
@@ -321,24 +394,29 @@ def run():
         if held.get(symbol) is None:
             owners.pop(symbol, None)
 
+    open_total = sum(1 for position in held.values() if position is not None)
+    counts = openCounts(held, owners)
+    log("holding %d position(s) across %d symbol(s)%s"
+        % (open_total, len(config.symbols),
+           (" - " + ", ".join("%s=%d" % item for item in sorted(counts.items())))
+           if counts else ""))
+
     # Pass two: act.
     for symbol in config.symbols:
-        if symbol not in held:
-            continue
-        position = held[symbol]
+        position = held.get(symbol)
         try:
             if position is not None:
                 result = handleHeld(client, symbol, position, owners)
                 if result.get("closed"):
-                    open_count -= 1
+                    open_total -= 1
+                    counts = openCounts(held, owners)
             else:
-                may_open = (
-                    config.max_open_positions == 0
-                    or open_count < config.max_open_positions
-                )
-                result = handleFlat(client, symbol, owners, may_open)
+                result = handleFlat(client, symbol, owners, open_total, counts)
                 if result.get("opened"):
-                    open_count += 1
+                    open_total += 1
+                    opener = result.get("strategy")
+                    if opener:
+                        counts[opener] = counts.get(opener, 0) + 1
         except executor.ExecutionError as error:
             log("%s: EXECUTION ERROR %s" % (symbol, error))
             failures.append("%s: %s" % (symbol, error))
@@ -356,7 +434,7 @@ def run():
         log("run finished with %d failure(s)" % len(failures))
         return 1
 
-    log("run finished cleanly, %d position(s) open" % open_count)
+    log("run finished cleanly, %d position(s) open" % open_total)
     return 0
 
 

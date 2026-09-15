@@ -65,25 +65,28 @@ project_name = project_dir.name
 
 
 def processTable():
-    """Every running process as (pid, executable, command line).
+    """Every running process as (pid, parent_pid, executable, command line).
 
-    Best effort, never raises. Windows has no ps, so PowerShell's process
+    Best effort, never raises. Windows has no ps, so the PowerShell process
     table stands in. The tab separator matters: command lines are full of
     spaces, and splitting on those would cut paths in half.
 
     The executable is carried separately from the command line because the two
     answer different questions - "what program is this" versus "what was it
     asked to do" - and only the first can be trusted to identify a process.
+    The parent is carried because a virtualenv launcher shows up as a second
+    process running the same command as its own child.
     """
     if os.name == "nt":
         script = (
             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | "
-            "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }"
+            "ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t"
+            "$($_.Name)`t$($_.CommandLine)\" }"
         )
         command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
         separator = "\t"
     else:
-        command = ["ps", "-eo", "pid=,comm=,args="]
+        command = ["ps", "-eo", "pid=,ppid=,comm=,args="]
         separator = None
 
     try:
@@ -97,37 +100,38 @@ def processTable():
         line = line.strip()
         if not line:
             continue
-        parts = line.split(separator, 2) if separator else line.split(None, 2)
-        if len(parts) < 3:
+        parts = line.split(separator, 3) if separator else line.split(None, 3)
+        if len(parts) < 4:
             continue
-        pid_text, executable, command_line = parts
+        pid_text, parent_text, executable, command_line = parts
         try:
-            rows.append((int(pid_text), executable.strip(), command_line.strip()))
+            rows.append((int(pid_text), int(parent_text),
+                         executable.strip(), command_line.strip()))
         except ValueError:
             continue
     return rows
 
 
 def botProcesses():
-    """Other processes running THIS project's run.py, as (pid, command).
+    """Other processes running the run.py of THIS project, as (pid, command).
 
     Three conditions, and the first one is not optional.
 
     THE PROCESS MUST BE A PYTHON INTERPRETER. Matching on the command line
     alone was a real bug, caught the first time this ran: the shell executing
-    `python run.py --kill-all` carries both "run.py" and the project path in
-    its OWN command line, so kill-all killed the terminal it was typed into.
+    the kill-all command carries both "run.py" and the project path in its OWN
+    command line, so the command killed the terminal it was typed into.
     Editors, terminals and task runners mention file paths constantly; only an
     interpreter actually runs one.
 
-    Then the command line has to name run.py, and it has to name this
-    project's directory, so an unrelated project's run.py is never a target.
-    Our own pid and our parent's are excluded, which is what keeps the command
-    from killing the shell that launched it.
+    Then the command line has to name run.py, and it has to name this project
+    directory, so an unrelated project run.py is never a target. Our own pid
+    and our parent pid are excluded, which keeps the command from killing the
+    shell that launched it.
     """
     mine = {os.getpid(), os.getppid()}
     found = []
-    for pid, executable, command in processTable():
+    for pid, parent, executable, command in processTable():
         if pid in mine:
             continue
         if not os.path.basename(executable).lower().startswith("python"):
@@ -138,14 +142,43 @@ def botProcesses():
             print("  (ignoring PID %d, a run.py that does not look like %s)"
                   % (pid, project_name))
             continue
-        found.append((pid, command))
-    return found
+        found.append((pid, parent, command))
+    return [(pid, command) for pid, parent, command in found]
+
+
+def botRoots():
+    """One entry per RUNNING BOT, rather than per process.
+
+    A virtualenv on Windows launches python.exe as a small stub that starts
+    the real interpreter as its child, so a single `run.py --loop` shows up
+    twice in the process table with an identical command line. Counting raw
+    processes therefore reports two bots where there is one - which is not a
+    cosmetic problem, because "you are running two copies" is a warning that
+    sends someone hunting for a duplicate that does not exist.
+
+    A process whose parent is also a bot process is a child of one, not a bot
+    of its own.
+    """
+    rows = []
+    for pid, parent, executable, command in processTable():
+        if pid in {os.getpid(), os.getppid()}:
+            continue
+        if not os.path.basename(executable).lower().startswith("python"):
+            continue
+        if "run.py" not in command or project_name.lower() not in command.lower():
+            continue
+        rows.append((pid, parent, command))
+    pids = {pid for pid, _, _ in rows}
+    return [(pid, command) for pid, parent, command in rows if parent not in pids]
 
 
 def stopProcess(pid, force):
     """Ask a process to stop, or insist. True if the request was accepted."""
     if os.name == "nt":
-        command = ["taskkill", "/PID", str(pid)] + (["/F"] if force else [])
+        # /T takes the process tree. A virtualenv launcher and the real
+        # interpreter it started are one bot, and killing only the parent can
+        # leave the child cycling.
+        command = ["taskkill", "/PID", str(pid), "/T"] + (["/F"] if force else [])
     else:
         command = ["kill", "-KILL" if force else "-TERM", str(pid)]
     try:
@@ -165,13 +198,15 @@ def killAll():
     actually lost when it happens - the next run asks Bybit what it holds -
     but waiting KILL_GRACE_SECONDS is cheaper than not waiting.
     """
-    targets = botProcesses()
+    targets = botRoots()
     if not targets:
         print("No other copy of the bot is running.")
         return 0
 
-    print("Found %d running cop%s of the bot:"
-          % (len(targets), "y" if len(targets) == 1 else "ies"))
+    extra = len(botProcesses()) - len(targets)
+    print("Found %d running cop%s of the bot%s:"
+          % (len(targets), "y" if len(targets) == 1 else "ies",
+             " (plus %d launcher/child process(es))" % extra if extra > 0 else ""))
     for pid, command in targets:
         print("  PID %-7d %s" % (pid, command))
 
@@ -209,7 +244,7 @@ def killAll():
 
 def warnAboutDuplicates():
     """Say something before a second loop is started by accident."""
-    others = botProcesses()
+    others = botRoots()
     if not others:
         return
     print("\n  WARNING: the bot already appears to be running:")
@@ -359,7 +394,9 @@ def run():
     try:
         while True:
             cycle += 1
+            started = time.monotonic()
             last_code = runCycle(cycle)
+            elapsed = time.monotonic() - started
 
             # One-shot: without this a forced entry would re-fire on every
             # symbol on every cycle, which is a fast way to open a lot of
@@ -368,9 +405,21 @@ def run():
                 config.force_entry = False
                 print("(force-entry consumed, later cycles follow the strategy)")
 
-            next_run = datetime.now() + timedelta(minutes=interval)
-            print("\nnext cycle at %s" % next_run.strftime("%H:%M:%S"))
-            sleepUntil(interval * 60)
+            # The interval is a PERIOD, not a gap. Sleeping the full
+            # interval AFTER the work would push forty symbols on two
+            # timeframes out to well over a minute between cycles, which is
+            # not what "every minute" asked for. Sleep only the remainder.
+            remaining = interval * 60 - elapsed
+            if remaining <= 0:
+                print("")
+                print("cycle took %.0fs, longer than the %d min interval - "
+                      "starting the next one immediately" % (elapsed, interval))
+                continue
+            next_run = datetime.now() + timedelta(seconds=remaining)
+            print("")
+            print("cycle took %.0fs, next at %s"
+                  % (elapsed, next_run.strftime("%H:%M:%S")))
+            sleepUntil(remaining)
     except KeyboardInterrupt:
         print("\n\nstopped after %d cycle(s)." % cycle)
         print("Open positions stay protected by the stop loss, take profit and")

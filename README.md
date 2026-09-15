@@ -294,7 +294,7 @@ nich, moze wisiec dlugo.
 
 ## Strategie
 
-`STRATEGY = "trend" | "meanrev" | "breakout" | "multi"`. Przy `multi` bot
+`STRATEGY = "trend" | "meanrev" | "breakout" | "scalp" | "multi"`. Przy `multi` bot
 liczy **wszystkie** strategie z `ACTIVE_STRATEGIES` w każdym cyklu i wchodzi,
 gdy zgodzi się co najmniej `MIN_ENTRY_VOTES` z nich. Żaden inny plik się nie
 zmienia.
@@ -304,6 +304,7 @@ zmienia.
 | `trend` | EMA szybka przecina wolną od dołu, potwierdzone przez ADX | szybka poniżej wolnej | `EMA_FAST_PERIOD`, `EMA_SLOW_PERIOD`, `ADX_PERIOD`, `ADX_MIN` |
 | `meanrev` | krótkie RSI spada do strefy wyprzedania **w trendzie wzrostowym** | close wraca nad krótką SMA, albo RSI dochodzi do wykupienia | `RSI_PERIOD`, `RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `MEANREV_EXIT_SMA_PERIOD` |
 | `breakout` | close powyżej maksimum z N świec | close poniżej minimum z **M** świec, M < N | `BREAKOUT_LOOKBACK`, `BREAKOUT_EXIT_LOOKBACK` |
+| `scalp` | close pod dolną wstęgą Bollingera, **rama 15m** | powrót do środkowej wstęgi | `BB_PERIOD`, `BB_STDEV`, `BB_LOOKBACK_BARS` |
 
 > To **podręcznikowe systemy z opublikowaną historią, nie przewagi, które sami
 > odkryliśmy.** Zakładaj, że każda traci po prowizjach, dopóki twój własny
@@ -342,6 +343,78 @@ Gdy właściciel jest nieznany (pozycja otwarta ręcznie, plik stanu utracony),
 decyduje `UNKNOWN_OWNER_EXIT`: `any` / `all` / `regime`. Plik stanu jest
 najlepszym staraniem i **nigdy** nie decyduje o tym, czy pozycja istnieje —
 tu jedynym źródłem prawdy pozostaje giełda.
+
+### Dwa zegary naraz: swing i scalping
+
+`STRATEGY_TIMEFRAMES` daje każdej strategii własną ramę czasową, więc bot
+prowadzi jednocześnie **księgę dzienną i szybką**, w tym samym cyklu i na tym
+samym koncie. Trzy reguły czytają świece godzinowe, `scalp` czyta 15-minutowe.
+
+`scalp` to powrót do średniej na wstęgach Bollingera: kupuje zamknięcie
+rozciągnięte pod dolną wstęgą, wychodzi gdy cena wróci do środka. Zasługuje na
+miejsce obok pozostałych, bo odchylenie standardowe mierzy coś, czego nie
+mierzy żadna z nich — **jak daleko obecny ruch leży poza normalną zmiennością
+tego rynku**. Dlatego ta sama reguła działa na BTC i na memecoinie bez
+strojenia.
+
+Zmierzone trzymanie pozycji: `scalp` minuty do ~2 godzin, reguły godzinowe
+kilka do kilkunastu godzin.
+
+**`MAX_OPEN_PER_STRATEGY` jest tym, co czyni to prawdziwym, a nie pozornym.**
+Bez tego szybka strategia zjada wszystkie sloty, zanim wolne w ogóle do
+któregoś dojdą: reguła 15-minutowa na czterdziestu rynkach odpala
+wielokrotnie częściej niż godzinowa, więc „szybko **i** dziennie" po cichu
+zamienia się w „tylko szybko".
+
+Filtr reżimu liczony jest **osobno dla każdej strategii, na jej własnej
+ramie**. Na świecach godzinowych linia 200-okresowa to około ośmiu dni trendu,
+na 15-minutowych około dwóch. Skalper nie ma po co być blokowany widokiem
+ośmiodniowym, a reguła swingowa nie ma po co być wpuszczana dwudniowym.
+
+### Stop za ceną likwidacji to nie jest stop
+
+**Najważniejsza rzecz, jakiej nauczyło nas testowanie na żywo.** Dźwignia
+stawia likwidację mniej więcej `100/dźwignia` procent od wejścia — 6,67% przy
+15x. Stop dalej niż to **nigdy nie zadziała**: giełda zamknie pozycję
+pierwsza, zabierze cały depozyt i doliczy opłatę likwidacyjną.
+
+Złapane na tym koncie, nie w teorii:
+
+```
+ARB   wejscie     0.15130
+      stop loss   0.14061   (-7.07%)
+      LIKWIDACJA  0.14264   (-5.72%)   <- wyzej niz stop
+```
+
+Zmierzone na czterdziestu symbolach: 2×ATR waha się od **1,24% na BTC do 27%
+na najdzikszym alcie** — różnica dwudziestokrotna. Żadna pojedyncza wartość
+`LEVERAGE` tego nie obsłuży, więc zabezpieczenie działa per transakcja:
+
+| Ustawienie | Co robi |
+|---|---|
+| `MAX_STOP_FRACTION_OF_LIQUIDATION=0.5` | przycina stop do połowy dystansu do likwidacji |
+| `MIN_STOP_ATR_MULT=1.0` | **odrzuca transakcję**, gdy po przycięciu stop byłby węższy niż 1×ATR |
+
+Drugie jest równie ważne jak pierwsze. Stop wciśnięty w zwykły ruch świecy to
+nie ochrona, tylko zaplanowane wyjście, które następna świeca uruchomi
+przypadkiem. Na symbolu o ATR równym 13% ceny nie istnieje stop, który
+jednocześnie mieści się w likwidacji przy 15x i cokolwiek znaczy — i uczciwą
+odpowiedzią jest nie brać tej transakcji.
+
+### Skąd się wzięła lista czterdziestu symboli
+
+Ranking po obrocie 24h, odczytany wprost z giełdy. Bybit ma **762** wieczyste
+kontrakty USDT i pobranie wszystkich nie wchodzi w grę: jeden cykl trwałby
+około 14 minut, czyli dłużej niż świeca, którą skalper ma łapać.
+
+Surowa czterdziestka po obrocie **nie jest samym krypto**. Siedzą w niej
+tokenizowane akcje i surowce — AAPL, TSLA, MSTR, SOXL, SKHYNIX, XAU, XAG,
+ropa — które chodzą wedle innego zegara i innej logiki niż cokolwiek, pod co
+te strategie budowano. Nic w metadanych API ich nie odróżnia: `contractType`
+jest identyczny, `fetch_currencies()` nic nie zwraca na hoście demo, a handel
+idzie 24/7, więc test „martwych świec" też ich nie wyłapuje. Zostały więc
+wykluczone z nazwy, a wszystko, czego tożsamości nie dało się ustalić na
+pewno, po prostu pominięto zamiast zgadywać.
 
 ### Model ryzyka: ATR zamiast sztywnych procentów
 
