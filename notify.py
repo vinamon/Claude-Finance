@@ -63,6 +63,18 @@ def positionOpened(result):
         "qty %s @ %.6f" % (result["qty"], result["price"]),
         "notional %.2f USDT" % result["notional"],
     ]
+    if result.get("strategy"):
+        votes = result.get("votes") or []
+        # Naming the strategy on the phone matters more once several run at
+        # once: "which rule opened this" is the first thing you want to know,
+        # and it is also what decides when the position will be let go.
+        lines.append(
+            "strategy %s%s"
+            % (result["strategy"],
+               (" (agreed: %s)" % ", ".join(votes)) if len(votes) > 1 else "")
+        )
+    if result.get("risk_model"):
+        lines.append("risk %s" % result["risk_model"])
     if result.get("stop_loss") is not None:
         lines.append("SL %.6f" % result["stop_loss"])
     if result.get("take_profit") is not None:
@@ -96,8 +108,9 @@ def positionClosed(record):
 
 
 def strategyExit(result):
+    owner = result.get("strategy")
     return push(
-        "Exit signal %s" % result["symbol"],
+        "Exit signal %s%s" % (result["symbol"], (" [%s]" % owner) if owner else ""),
         "closed %s contracts\nwhy: %s" % (result["qty"], result["reason"]),
         priority="high",
         tags=["outbox_tray"],

@@ -1,13 +1,31 @@
 name: keepalive
 
-# GitHub disables scheduled workflows in a repository that has seen no commits
-# for 60 days. A workflow that merely runs does not reset that clock - only
-# repository activity does. So this pushes an empty commit once a week, which
-# costs nothing and keeps trade.yml's cron alive.
+# =============================================================================
+# ARCHIVED - this workflow does not run on a schedule any more.
+#
+# WHAT IT WAS FOR. GitHub disables scheduled workflows in a repository that
+# has seen no commits for 60 days. A workflow that merely runs does not reset
+# that clock - only repository activity does. So this pushed an empty commit
+# once a week, purely to keep trade.yml's cron from being switched off.
+#
+# WHY IT IS OFF. trade.yml no longer has a cron to keep alive (Bybit
+# geo-blocks GitHub's runners; see that file), so this workflow was weekly
+# commit noise protecting nothing. Worse, it is the one workflow here with
+# `contents: write`, so leaving it on a schedule meant a scheduled job with
+# push rights running for no reason at all.
+#
+# ONLY REACTIVATE THIS AFTER trade.yml HAS A SCHEDULE AGAIN. On its own it
+# does nothing useful. To bring it back:
+#
+#   on:
+#     schedule:
+#       - cron: "17 4 * * 1"
+#     workflow_dispatch:
+#
+# Kept rather than deleted so the mechanism does not have to be rediscovered.
+# =============================================================================
 
 on:
-  schedule:
-    - cron: "17 4 * * 1"
   workflow_dispatch:
 
 permissions:

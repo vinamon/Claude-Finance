@@ -4,6 +4,18 @@ name: smoke-test
 # as a button instead of a terminal. Run it from the Actions tab or the GitHub
 # mobile app, read the result in the logs. Nothing to install, no local clone,
 # and the secrets never leave GitHub.
+#
+# NOT ARCHIVED, because it never had a schedule - it only ever runs when
+# someone presses the button. Left exactly as it was.
+#
+# EXPECT STEP 1 TO FAIL FROM A GITHUB RUNNER. Bybit geo-blocks the country
+# they sit in, so the connection check returns 403 no matter how correct the
+# keys are (see trade.yml for the measurement). Step 2, the ntfy push, does
+# not touch Bybit and still works. To really test the connection, run it
+# locally instead:
+#
+#     python scripts/test_connection.py
+#     python scripts/test_ntfy.py
 
 on:
   workflow_dispatch:

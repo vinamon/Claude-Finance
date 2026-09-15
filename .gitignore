@@ -1,5 +1,12 @@
-# secrets - never commit
+# secrets - never commit.
+#
+# The wildcard matters: plain ".env" does not cover .env.backup, .env.local or
+# anything else that ends up holding a copy of the keys, and a public repo is
+# the worst possible place to discover that. .env.example is the template and
+# is deliberately negated back in.
 .env
+.env.*
+!.env.example
 
 __pycache__/
 *.py[cod]

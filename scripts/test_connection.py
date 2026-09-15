@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ccxt
 
 import config
-from exchange import buildExchange
+from exchange import buildExchange, clockReport
 
 # Bybit's own codes, mapped to the thing that actually went wrong. Without
 # this a failure is just a wall of JSON and a guess.
@@ -31,6 +31,10 @@ error_hints = {
              "restriction: GitHub runners get a fresh IP every run.",
     "33004": "the API key has expired. Keys without an IP binding expire "
              "after 90 days. Generate a new one and update the secret.",
+    "10002": "timestamp rejected. Bybit allows the signed timestamp to run at "
+             "most 1000 ms AHEAD of its own clock, no matter what recv_window "
+             "says. exchange.syncClock() normally compensates for this, so "
+             "seeing it here means the offset could not be measured.",
 }
 
 
@@ -49,14 +53,18 @@ def explain(error):
 
 
 def main():
+    print("python:         %s" % sys.executable)
+    print("config:         %s" % config.envDiagnosis())
     if not config.bybit_api_key or not config.bybit_api_secret:
-        print("BYBIT_API_KEY / BYBIT_API_SECRET are not set")
+        print("\nBYBIT_API_KEY / BYBIT_API_SECRET are not set")
         return 1
+
 
     client = buildExchange()
     # resolve ccxt's {hostname} template - printing it raw is just confusing
     print("REST host:      %s" % client.implode_hostname(client.urls["api"]["private"]))
     print("demo trading:   %s" % client.options.get("enableDemoTrading"))
+    print("clock:          %s" % clockReport(client))
     print("key length:     %d chars" % len(config.bybit_api_key))
     print("secret length:  %d chars" % len(config.bybit_api_secret))
     if config.bybit_api_key != config.bybit_api_key.strip():
