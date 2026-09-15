@@ -372,6 +372,14 @@ owners_state_file = envStr("OWNERS_STATE_FILE", "state/owners.json")
 # Fail loudly rather than silently doing nothing.
 request_timeout_seconds = envInt("REQUEST_TIMEOUT_SECONDS", 30)
 
+# Seconds `run.py --kill-all` gives another copy of the bot to shut down
+# politely before it is killed outright. A cycle mid-flight is finishing an
+# HTTP call to Bybit, so a few seconds is worth waiting: a forced kill during
+# an order round-trip is the one moment the local view and the exchange can
+# disagree. Nothing is lost if it does happen - the next run asks Bybit what
+# it holds - but the polite path is cheaper.
+kill_grace_seconds = envInt("KILL_GRACE_SECONDS", 5)
+
 # Environment variables that used to mean something and no longer do. Warned
 # about in validate(), because a stale key in .env that is silently ignored is
 # the kind of thing that costs an afternoon.

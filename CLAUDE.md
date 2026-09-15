@@ -141,6 +141,22 @@ and the only symptom is "keys not set".
 `--force-entry` or a GitHub `workflow_dispatch` run. `--force-entry` is
 one-shot in loop mode on purpose.
 
+`python run.py --kill-all` stops every other copy of the bot: Ctrl+C only
+works if you still have the window. Two loops at once do not open duplicate
+positions - the exchange is asked every cycle and the orderLinkId bucket
+rejects the second order - but both write `state/owners.json`, so the record
+of which strategy opened a position can be lost and the exit falls back to
+`UNKNOWN_OWNER_EXIT`. `--loop` warns when another copy is already running.
+
+**A process is identified by its executable, never by its command line
+alone.** This was a real bug the first time `--kill-all` ran, not a
+theoretical one: the shell executing `python run.py --kill-all` carries both
+"run.py" and the project path in its own command line, so the command killed
+the terminal it was typed into. `botProcesses()` now requires the executable
+to be a Python interpreter, and excludes its own pid and its parent's. Do not
+loosen that check - editors, terminals and task runners mention file paths
+constantly, and only an interpreter actually runs one.
+
 ## Every setting is a knob. Do not hardcode one.
 
 No period, threshold, multiplier or boolean is written into `signals.py`,
