@@ -5,8 +5,16 @@ Laptop runner. The switch between "it runs itself" and "I run it".
     python run.py --loop          keep cycling until you press Ctrl+C
     python run.py --force-entry   one cycle that opens a test position
     python run.py --loop --interval 1   cycle every minute
+    python run.py --kill-all      stop every other running copy, then exit
 
 Or set AUTOSTART=true in .env and plain `python run.py` loops by default.
+
+STOPPING IT
+-----------
+Ctrl+C in the window it runs in, or `--kill-all` from anywhere - useful when
+the loop was started in a terminal that is now closed, or when a second copy
+got started by accident. Neither touches open positions: the stop loss, take
+profit and trailing stop live on Bybit and keep working regardless.
 
 WHY THERE IS NO CRON HERE
 -------------------------
@@ -25,13 +33,190 @@ An open position is protected, not managed.
 
 import argparse
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import config
 import main
 import signals
+
+
+# ---------------------------------------------------------------------------
+# finding and stopping other copies of the bot
+#
+# WHY THIS EXISTS. Two loops running at once do not open duplicate positions:
+# every cycle asks the exchange what it holds, and the orderLinkId bucket
+# rejects a second order inside the same window. What they do wreck is
+# state/owners.json. Both processes write it and the later write wins, so the
+# record of WHICH strategy opened a position can be lost - and the exit then
+# falls back to UNKNOWN_OWNER_EXIT instead of the rule that belongs to the
+# trade. You also get every push notification twice.
+#
+# There is deliberately no psutil dependency for this. One convenience command
+# is not worth another package to install and pin, so the process list comes
+# from whatever the platform already ships.
+# ---------------------------------------------------------------------------
+
+project_dir = Path(__file__).resolve().parent
+project_name = project_dir.name
+
+
+def processTable():
+    """Every running process as (pid, executable, command line).
+
+    Best effort, never raises. Windows has no ps, so PowerShell's process
+    table stands in. The tab separator matters: command lines are full of
+    spaces, and splitting on those would cut paths in half.
+
+    The executable is carried separately from the command line because the two
+    answer different questions - "what program is this" versus "what was it
+    asked to do" - and only the first can be trusted to identify a process.
+    """
+    if os.name == "nt":
+        script = (
+            "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | "
+            "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }"
+        )
+        command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
+        separator = "\t"
+    else:
+        command = ["ps", "-eo", "pid=,comm=,args="]
+        separator = None
+
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    except Exception as error:
+        print("could not read the process list (%s)" % error)
+        return []
+
+    rows = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(separator, 2) if separator else line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid_text, executable, command_line = parts
+        try:
+            rows.append((int(pid_text), executable.strip(), command_line.strip()))
+        except ValueError:
+            continue
+    return rows
+
+
+def botProcesses():
+    """Other processes running THIS project's run.py, as (pid, command).
+
+    Three conditions, and the first one is not optional.
+
+    THE PROCESS MUST BE A PYTHON INTERPRETER. Matching on the command line
+    alone was a real bug, caught the first time this ran: the shell executing
+    `python run.py --kill-all` carries both "run.py" and the project path in
+    its OWN command line, so kill-all killed the terminal it was typed into.
+    Editors, terminals and task runners mention file paths constantly; only an
+    interpreter actually runs one.
+
+    Then the command line has to name run.py, and it has to name this
+    project's directory, so an unrelated project's run.py is never a target.
+    Our own pid and our parent's are excluded, which is what keeps the command
+    from killing the shell that launched it.
+    """
+    mine = {os.getpid(), os.getppid()}
+    found = []
+    for pid, executable, command in processTable():
+        if pid in mine:
+            continue
+        if not os.path.basename(executable).lower().startswith("python"):
+            continue
+        if "run.py" not in command:
+            continue
+        if project_name.lower() not in command.lower():
+            print("  (ignoring PID %d, a run.py that does not look like %s)"
+                  % (pid, project_name))
+            continue
+        found.append((pid, command))
+    return found
+
+
+def stopProcess(pid, force):
+    """Ask a process to stop, or insist. True if the request was accepted."""
+    if os.name == "nt":
+        command = ["taskkill", "/PID", str(pid)] + (["/F"] if force else [])
+    else:
+        command = ["kill", "-KILL" if force else "-TERM", str(pid)]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        return result.returncode == 0
+    except Exception as error:
+        print("  could not signal PID %d: %s" % (pid, error))
+        return False
+
+
+def killAll():
+    """Stop every other copy of this bot. Returns a process exit code.
+
+    Polite first, forceful only if needed. A cycle in flight is usually
+    mid-HTTP-call to Bybit, and a forced kill during an order round trip is
+    the one moment the local view and the exchange can disagree. Nothing is
+    actually lost when it happens - the next run asks Bybit what it holds -
+    but waiting KILL_GRACE_SECONDS is cheaper than not waiting.
+    """
+    targets = botProcesses()
+    if not targets:
+        print("No other copy of the bot is running.")
+        return 0
+
+    print("Found %d running cop%s of the bot:"
+          % (len(targets), "y" if len(targets) == 1 else "ies"))
+    for pid, command in targets:
+        print("  PID %-7d %s" % (pid, command))
+
+    print("\nAsking them to stop (up to %ds)..." % config.kill_grace_seconds)
+    for pid, _ in targets:
+        stopProcess(pid, force=False)
+
+    deadline = time.monotonic() + config.kill_grace_seconds
+    while time.monotonic() < deadline:
+        if not botProcesses():
+            break
+        time.sleep(0.3)
+
+    survivors = botProcesses()
+    if survivors:
+        print("Still up, forcing:")
+        for pid, _ in survivors:
+            print("  PID %d" % pid)
+            stopProcess(pid, force=True)
+        time.sleep(1.0)
+
+    left = botProcesses()
+    if left:
+        print("\nCould not stop: %s" % ", ".join(str(pid) for pid, _ in left))
+        print("Another user may own them, or they need administrator rights.")
+        return 1
+
+    print("\nStopped %d process(es). Nothing of this bot is running now."
+          % len(targets))
+    print("Open positions stay protected by the stop loss, take profit and")
+    print("trailing stop held on Bybit. They just will not be managed by the")
+    print("strategy until you start the bot again.")
+    return 0
+
+
+def warnAboutDuplicates():
+    """Say something before a second loop is started by accident."""
+    others = botProcesses()
+    if not others:
+        return
+    print("\n  WARNING: the bot already appears to be running:")
+    for pid, command in others:
+        print("    PID %-7d %s" % (pid, command))
+    print("  Two loops fight over state/owners.json and double every push.")
+    print("  Stop the other one with:  python run.py --kill-all\n")
 
 
 def parseArgs():
@@ -56,6 +241,13 @@ def parseArgs():
         metavar="MINUTES",
         help="minutes between cycles in loop mode (default: %d)"
         % config.loop_interval_minutes,
+    )
+    parser.add_argument(
+        "--kill-all",
+        action="store_true",
+        help="stop every other running copy of this bot, then exit. Does not "
+        "touch open positions - the exchange-side stop loss, take profit and "
+        "trailing stop keep protecting them.",
     )
     parser.add_argument(
         "--force-entry",
@@ -106,6 +298,13 @@ def runCycle(cycle):
 
 def run():
     args = parseArgs()
+
+    # Answered before config validation and before anything that needs keys:
+    # stopping a runaway loop must not itself depend on the configuration
+    # being correct.
+    if args.kill_all:
+        return killAll()
+
     looping = resolveMode(args)
     interval = args.interval if args.interval is not None else config.loop_interval_minutes
 
@@ -134,6 +333,13 @@ def run():
           % (("long only above SMA%d" % config.regime_period)
              if config.regime_filter else "filter OFF"))
     print("  risk model:  %s" % config.risk_model)
+    # Notional and margin are shown together on purpose. They are the two
+    # numbers people most often confuse, and leverage silently decides which
+    # one you are actually risking.
+    print("  size:        %.0f USDT notional, %.2f USDT margin at %dx"
+          % (config.position_notional_usdt,
+             config.position_notional_usdt / max(1, config.leverage),
+             config.leverage))
     print("  timeframe:   entry %s, exit %s" % (config.entry_timeframe, config.exit_timeframe))
     print("  dummy_mode:  %s" % config.dummy_mode)
     print("  max open:    %s" % (config.max_open_positions or "unlimited"))
@@ -142,6 +348,10 @@ def run():
         print("  force-entry: yes, first cycle only")
     if not looping:
         return runCycle(1)
+
+    # A second loop is the mistake worth catching, and only loops collide -
+    # a single run finishes before it can race anything.
+    warnAboutDuplicates()
 
     print("\nCtrl+C to stop.")
     cycle = 0

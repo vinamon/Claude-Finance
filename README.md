@@ -219,6 +219,7 @@ wiec nigdy nie trafi do repo.
 | `python run.py --loop` | krazy co `LOOP_INTERVAL_MINUTES` do Ctrl+C |
 | `python run.py --loop --interval 1` | to samo, co minute |
 | `python run.py --force-entry` | jeden cykl, ktory otwiera pozycje testowa |
+| `python run.py --kill-all` | **ubija kazda dzialajaca kopie bota** i konczy |
 
 W `.env` ustawiasz zachowanie domyslne:
 
@@ -238,6 +239,30 @@ sie w czasie.
 Harmonogram siedzi w samym skrypcie, nie w cronie ani Harmonogramie zadan
 Windows. Jeden mechanizm zamiast trzech zaleznych od systemu, i widzisz
 odliczanie do nastepnego cyklu na wlasne oczy.
+
+### Jak zatrzymac bota
+
+Ctrl+C w oknie, w ktorym chodzi. A kiedy tego okna juz nie ma albo kopii jest
+kilka:
+
+```
+python run.py --kill-all
+```
+
+Znajduje kazdy proces Pythona uruchamiajacy `run.py` **tego** projektu, prosi
+grzecznie, czeka `KILL_GRACE_SECONDS` i dopiero potem ubija na twardo.
+
+**Dwie kopie naraz to realny problem**, nie teoria. Podwojnych pozycji nie
+otworza — kazdy cykl pyta gielde, co jest trzymane, a `orderLinkId` odrzuci
+duplikat. Ale obie pisza do `state/owners.json` i wygrywa ta, ktora zapisze
+pozniej, wiec mozesz zgubic informacje, **ktora strategia otworzyla pozycje**.
+Wyjsciem pokieruje wtedy `UNKNOWN_OWNER_EXIT` zamiast wlasciwej reguly. Do
+tego kazdy push dostaniesz dwa razy. Dlatego `--loop` ostrzega, gdy wykryje
+juz dzialajaca kopie.
+
+Ani Ctrl+C, ani `--kill-all` nie rusza otwartych pozycji: stop loss, take
+profit i trailing siedza na Bybicie i dzialaja niezaleznie od tego, czy
+cokolwiek chodzi na laptopie.
 
 ### Pierwsze uruchomienie, po kolei
 
