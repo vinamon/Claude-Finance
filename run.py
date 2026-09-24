@@ -406,9 +406,9 @@ def run():
                 print("(force-entry consumed, later cycles follow the strategy)")
 
             # The interval is a PERIOD, not a gap. Sleeping the full
-            # interval AFTER the work would push forty symbols on two
-            # timeframes out to well over a minute between cycles, which is
-            # not what "every minute" asked for. Sleep only the remainder.
+            # interval AFTER the work would stretch every gap by however long
+            # the cycle itself took, which is not what "every N minutes"
+            # asked for. Sleep only the remainder.
             remaining = interval * 60 - elapsed
             if remaining <= 0:
                 print("")

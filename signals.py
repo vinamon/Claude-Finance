@@ -9,17 +9,19 @@ one reads config.<name>, and each of those reads an environment variable of
 the same upper-case name, which means every knob is settable from .env without
 touching code. If you find a bare number in a strategy here, it is a bug.
 
-THREE STRATEGIES, AND THEY CAN ALL RUN AT ONCE
-----------------------------------------------
+FOUR STRATEGIES, AND THEY CAN ALL RUN AT ONCE
+---------------------------------------------
   trend     EMA fast/slow crossover, confirmed by ADX trend strength
   meanrev   Connors-style short-RSI pullback bought inside an uptrend
   breakout  Donchian (Turtle) channel breakout, asymmetric exit
+  scalp     Bollinger band stretch below the lower band, back to the middle
 
 config.strategy picks one, or "multi" runs every strategy in
 config.active_strategies and enters when at least config.min_entry_votes of
-them agree. They are textbook systems with published track records, not edges
-we discovered. Assume each loses money after fees until a backtest says
-otherwise.
+them agree. By default all four read the same 15-minute candles;
+STRATEGY_TIMEFRAMES can move any of them to its own clock. They are textbook
+systems with published track records, not edges we discovered. Assume each
+loses money after fees until a backtest says otherwise.
 
 THE REGIME FILTER IS WHAT MAKES COMBINING THEM COHERENT
 -------------------------------------------------------
@@ -30,7 +32,7 @@ one strategy's entry is the other's exit.
 config.regime_filter resolves that. Every strategy may only go long while
 price is above the slow regime average, so mean reversion becomes "buy the dip
 IN an uptrend" - which is the well-documented version of it - rather than
-"catch the falling knife". All three then pull in the same direction and
+"catch the falling knife". They all then pull in the same direction and
 differ only in what triggers the entry.
 
 WHY ENTRIES ARE EVENTS AND EXITS ARE STATES
@@ -696,15 +698,16 @@ def breakoutExit(candles):
 # variation for this market, which is why the same rule works on BTC and on a
 # memecoin without retuning.
 #
-# It is the fast book. STRATEGY_TIMEFRAMES puts it on 15-minute candles while
-# the other three stay hourly, so it takes several trades inside the window a
-# single hourly bar covers - and MAX_OPEN_PER_STRATEGY stops it eating every
-# position slot before the slow rules can reach one.
+# It shares the 15-minute clock with the other three by default. Should a
+# slower rule ever go back to hourly candles through STRATEGY_TIMEFRAMES, give
+# this one a MAX_OPEN_PER_STRATEGY budget too, or it fires so much more often
+# that it takes every position slot before the slow rule can reach one.
 #
-# Honest caveat: a target measured in fractions of a percent is where fees
-# stop being a rounding error. At 4xATR on 15-minute candles the target is
-# roughly 1-2%, against about 0.11% for a taker round trip. Survivable, but
-# not free - and the reason this is not on 5-minute candles.
+# Honest caveat: on a fast clock fees stop being a rounding error. At 6xATR on
+# 15-minute candles the target is roughly 1.5-6%, but this rule usually exits
+# earlier, at the middle band, for a fraction of that - against about 0.11%
+# for a taker round trip. Survivable, but not free, and the reason this is not
+# on 5-minute candles.
 # ---------------------------------------------------------------------------
 
 
@@ -809,9 +812,9 @@ def strategyTimeframe(name):
     """The candle size this strategy is evaluated on.
 
     STRATEGY_TIMEFRAMES overrides ENTRY_TIMEFRAME per strategy, which is what
-    lets one bot hold a swing book and a scalping book at once: the slow rules
-    read hourly candles while "scalp" reads 15-minute ones, in the same cycle,
-    against the same account.
+    lets one bot hold a swing book and a scalping book at once - say a trend
+    rule on hourly candles beside the rest on 15-minute ones, in the same
+    cycle, against the same account. Empty by default: one clock for all.
     """
     return config.strategy_timeframes.get(name, config.entry_timeframe)
 
@@ -819,9 +822,9 @@ def strategyTimeframe(name):
 def requiredTimeframes():
     """Map of timeframe to how many candles to fetch, for everything active.
 
-    One entry per DISTINCT timeframe, not per strategy, so three strategies
-    sharing the hourly chart cost one request rather than three. The count is
-    the largest any strategy on that timeframe needs.
+    One entry per DISTINCT timeframe, not per strategy, so four strategies
+    sharing the 15-minute chart cost one request rather than four. The count
+    is the largest any strategy on that timeframe needs.
     """
     wanted = {}
     for name in activeStrategies():

@@ -175,6 +175,13 @@ order_bucket_seconds = envInt("ORDER_BUCKET_SECONDS", max(60, loop_interval_minu
 # strategy on ten markets fires roughly ten times as often as on one, and the
 # trades are far less correlated than the ones you would get by lowering a
 # threshold on a single market.
+#
+# The ten crypto perpetuals with the highest 24h turnover on Bybit, measured
+# 2026-09-24. Tokenized stocks and commodities in that ranking (SOXL, CL, XAU)
+# were skipped: they are not crypto and follow a different clock. On 15-minute
+# candles ten symbols gave about 25 entries a day in a replay, and the most
+# liquid markets are the ones where a market order fills near the price the
+# stop was measured from.
 symbols = envList(
     "SYMBOLS",
     [
@@ -183,40 +190,10 @@ symbols = envList(
         "XRP/USDT:USDT",
         "SOL/USDT:USDT",
         "ZEC/USDT:USDT",
-        "HYPE/USDT:USDT",
-        "LSK/USDT:USDT",
-        "DOGE/USDT:USDT",
         "NEAR/USDT:USDT",
-        "ENA/USDT:USDT",
-        "ARB/USDT:USDT",
-        "SUI/USDT:USDT",
-        "ADA/USDT:USDT",
-        "UNI/USDT:USDT",
+        "HYPE/USDT:USDT",
+        "DOGE/USDT:USDT",
         "1000PEPE/USDT:USDT",
-        "BNB/USDT:USDT",
-        "XLM/USDT:USDT",
-        "LINK/USDT:USDT",
-        "PUMPFUN/USDT:USDT",
-        "TAO/USDT:USDT",
-        "AAVE/USDT:USDT",
-        "ONDO/USDT:USDT",
-        "WLD/USDT:USDT",
-        "XPL/USDT:USDT",
-        "AVAX/USDT:USDT",
-        "USELESS/USDT:USDT",
-        "TRUMP/USDT:USDT",
-        "VVV/USDT:USDT",
-        "LTC/USDT:USDT",
-        "OP/USDT:USDT",
-        "FIL/USDT:USDT",
-        "T/USDT:USDT",
-        "XMR/USDT:USDT",
-        "FARTCOIN/USDT:USDT",
-        "HBAR/USDT:USDT",
-        "CVC/USDT:USDT",
-        "APT/USDT:USDT",
-        "INJ/USDT:USDT",
-        "ASTR/USDT:USDT",
         "BCH/USDT:USDT",
     ],
 )
@@ -232,23 +209,22 @@ active_strategies = envList("ACTIVE_STRATEGIES", ["trend", "breakout", "meanrev"
 # Per-strategy timeframe override, as "name:timeframe,name:timeframe".
 # Anything not listed runs on ENTRY_TIMEFRAME.
 #
-# This is what lets one bot hold a swing book and a scalping book at the same
-# time. The three slower rules read hourly candles; "scalp" reads 15-minute
-# ones, sees several times as many bars, and is in and out inside the window
-# a single hourly bar covers.
-strategy_timeframes = envMap("STRATEGY_TIMEFRAMES", {"scalp": "15m"})
+# Empty by default: every strategy trades the same 15-minute clock. The
+# override is what lets one bot hold a swing book and a scalping book at the
+# same time - "trend:1h" would put the trend rule back on hourly candles while
+# the rest stay fast.
+strategy_timeframes = envMap("STRATEGY_TIMEFRAMES", {})
 
 # Per-strategy ceiling on open positions, as "name:count". A strategy not
 # listed is limited only by MAX_OPEN_POSITIONS.
 #
-# Without this the fast strategy quietly starves the slow ones. A 15-minute
-# rule across forty symbols fires many times more often than an hourly one, so
-# it reaches every free slot first and the golden cross never gets to trade.
-# Budgeting them separately is what makes "fast AND daily" true rather than
-# "fast, and daily in theory".
-max_open_per_strategy = envMap("MAX_OPEN_PER_STRATEGY",
-                               {"scalp": 6, "trend": 3, "breakout": 3, "meanrev": 3},
-                               int)
+# Empty by default, because it only matters when strategies run on different
+# clocks. A 15-minute rule fires many times more often than an hourly one, so
+# with mixed timeframes it reaches every free slot first and the slow rules
+# never get to trade; budgeting them separately fixes that. With every rule on
+# the same clock there is nothing to protect, and a cap only turns signals
+# away.
+max_open_per_strategy = envMap("MAX_OPEN_PER_STRATEGY", {}, int)
 
 # How many active strategies must agree before a position opens. 1 is "any
 # signal trades" and produces the most trades; raising it demands confluence
@@ -258,7 +234,8 @@ min_entry_votes = envInt("MIN_ENTRY_VOTES", 1)
 # Hard ceiling on simultaneous open positions across all symbols, so a market
 # where everything breaks out at once cannot put the whole account to work in
 # one direction. Symbols are considered in SYMBOLS order. 0 disables the cap.
-max_open_positions = envInt("MAX_OPEN_POSITIONS", 12)
+max_open_positions = envInt("MAX_OPEN_POSITIONS", 10)
+
 
 # ---------------------------------------------------------------------------
 # position size and leverage
@@ -276,8 +253,11 @@ leverage = envInt("LEVERAGE", 1)
 # timeframes
 # ---------------------------------------------------------------------------
 
-# Timeframe the entry signal is evaluated on.
-entry_timeframe = envStr("ENTRY_TIMEFRAME", "1h")
+# Timeframe the entry signal is evaluated on. 15-minute candles: positions last
+# about three hours on average in a replay, and ten symbols give roughly 25
+# entries a day. The regime line (REGIME_PERIOD=200) is about two days on this
+# clock, and it is a condition checked every cycle, not a crossing to wait for.
+entry_timeframe = envStr("ENTRY_TIMEFRAME", "15m")
 
 # Timeframe the exit signal is evaluated on. Defaults to the entry timeframe,
 # and that default is the point: the exit rule uses the SAME indicator and the
@@ -305,8 +285,14 @@ regime_filter = envBool("REGIME_FILTER", True)
 regime_period = envInt("REGIME_PERIOD", 200)
 
 # Close any open position, whichever strategy opened it, when price falls back
-# under the regime average. The reason to be long at all has gone.
-exit_on_regime_break = envBool("EXIT_ON_REGIME_BREAK", True)
+# under the regime average.
+#
+# Off by default. Replayed on 15-minute candles over 26 days on ten symbols,
+# turning it off improved results in both halves of the sample: the dip
+# buyers (meanrev, scalp) enter precisely when price sags toward that line, so
+# this exit mostly closed trades that were about to work. Every position
+# already carries an exchange-side stop loss, which is the real protection.
+exit_on_regime_break = envBool("EXIT_ON_REGIME_BREAK", False)
 
 # What to do about a position whose owning strategy is unknown - opened by
 # hand, or the owner file was lost. "any" closes as soon as any active
@@ -320,8 +306,9 @@ unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "any")
 
 # Shorter and exponential rather than the classic SMA 50/200, which is a
 # DAILY-chart signal: on an intraday timeframe 50/200 fires once in months.
-# 20/50 on 1h is roughly a day against two days of history - a normal short
-# swing horizon.
+# On the 15-minute clock 20/50 is about five hours against twelve - a
+# crossing that happens a few times a day on an active market, which is the
+# point of a fast book. ADX below keeps the ones in a sideways market out.
 ema_fast_period = envInt("EMA_FAST_PERIOD", 20)
 ema_slow_period = envInt("EMA_SLOW_PERIOD", 50)
 
@@ -393,9 +380,13 @@ bb_lookback_bars = envInt("BB_LOOKBACK_BARS", 2)
 # percentage values automatically, so both sets below stay meaningful.
 risk_model = envStr("RISK_MODEL", "atr")
 
+# Stop 3 ATR, target 6 ATR. Two ATR is the textbook stop on daily candles; a
+# 15-minute candle is mostly noise by comparison and needs more room. Replayed
+# over 26 days on ten symbols, 3/6 beat 2/4 in both halves of the sample, with
+# fewer trades stopped out by ordinary wiggle.
 atr_period = envInt("ATR_PERIOD", 14)
-atr_stop_mult = envFloat("ATR_STOP_MULT", 2.0)
-atr_target_mult = envFloat("ATR_TARGET_MULT", 4.0)
+atr_stop_mult = envFloat("ATR_STOP_MULT", 3.0)
+atr_target_mult = envFloat("ATR_TARGET_MULT", 6.0)
 atr_trail_mult = envFloat("ATR_TRAIL_MULT", 1.5)
 atr_trail_activation_mult = envFloat("ATR_TRAIL_ACTIVATION_MULT", 3.0)
 
@@ -406,10 +397,12 @@ atr_trail_activation_mult = envFloat("ATR_TRAIL_ACTIVATION_MULT", 3.0)
 # position first, for the full margin, with a liquidation fee on top, and the
 # risk management the strategy was built around simply stops existing.
 #
-# Measured live across the forty symbols traded here, 2xATR ranges from 1.24%
-# on BTC to 27% on the wildest alt - a twentyfold spread. No single leverage
-# covers that, so the stop is capped per trade instead: it may use at most
-# this fraction of the distance to liquidation.
+# Measured live across the forty symbols traded at the time, 2xATR ranged from
+# 1.24% on BTC to 27% on the wildest alt - a twentyfold spread. Even the ten
+# liquid symbols traded now put a 15-minute 3xATR stop anywhere from 0.78%
+# (BTC, median) to 11% (NEAR, worst spell). No single leverage covers that,
+# so the stop is capped per trade instead: it may use at most this fraction
+# of the distance to liquidation.
 max_stop_fraction_of_liquidation = envFloat("MAX_STOP_FRACTION_OF_LIQUIDATION", 0.5)
 
 # WHEN A CAPPED STOP IS TOO TIGHT TO BE WORTH TAKING.
@@ -545,6 +538,15 @@ def warnings():
         notes.append(
             "MIN_ENTRY_VOTES=%d demands that %d strategies fire on the same bar, which is "
             "rare. Expect very few trades." % (min_entry_votes, min_entry_votes)
+        )
+    live = active_strategies if strategy == "multi" else [strategy]
+    clocks = sorted({strategy_timeframes.get(name, entry_timeframe) for name in live})
+    if len(clocks) > 1 and not max_open_per_strategy:
+        notes.append(
+            "STRATEGY_TIMEFRAMES puts the strategies on %s but MAX_OPEN_PER_STRATEGY is "
+            "empty. The faster clock fires many times more often and will take every "
+            "position slot before the slower rule reaches one; give each strategy a "
+            "budget." % " and ".join(clocks)
         )
     if not regime_filter and strategy == "multi" and len(active_strategies) > 1:
         notes.append(

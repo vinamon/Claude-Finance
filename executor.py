@@ -246,9 +246,11 @@ def capStopAtLiquidation(distances, entry_price):
     account: ARB opened with a 2xATR stop 7.07% away while liquidation sat
     5.72% away, so the stop could not have fired.
 
-    Volatility across a forty-symbol list spans a factor of twenty - 2xATR is
-    1.24% on BTC and 27% on the wildest alt - so no single leverage setting
-    makes every symbol safe. Capping per trade does.
+    Volatility spans a factor of twenty across the forty-symbol list traded at
+    the time - 2xATR was 1.24% on BTC and 27% on the wildest alt - and even
+    the ten liquid symbols traded now swing from a 3xATR stop of 0.78% to one
+    of 11% in a violent spell. No single leverage setting makes every symbol
+    safe. Capping per trade does.
     """
     limit = liquidationDistance(entry_price) * config.max_stop_fraction_of_liquidation
     if distances["stop"] <= limit:

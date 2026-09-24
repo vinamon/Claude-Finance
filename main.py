@@ -22,18 +22,18 @@ it counts only the symbols it happens to have visited and walks through the
 cap. The counts are then kept current as positions open and close within the
 run.
 
-Bybit answers "what do I hold" for every linear position in a single request,
-which matters now that the symbol list is forty long: one call instead of
-forty. The per-symbol path is kept as a fallback because a silent failure here
-would make the bot think it is flat and open duplicates.
+Bybit answers "what do I hold" for every linear position in a single request:
+one call for the whole symbol list instead of one per symbol. The per-symbol
+path is kept as a fallback because a silent failure here would make the bot
+think it is flat and open duplicates.
 
-SEVERAL TIMEFRAMES IN ONE CYCLE
--------------------------------
-Strategies no longer share one candle size. signals.requiredTimeframes() says
-which timeframes the active set needs and how much history each wants, and
-this module fetches exactly those - one request per distinct timeframe per
-symbol, not one per strategy. That is what lets the hourly swing rules and the
-15-minute scalper run against the same account in the same pass.
+ONE OR SEVERAL TIMEFRAMES IN ONE CYCLE
+--------------------------------------
+signals.requiredTimeframes() says which timeframes the active set needs and
+how much history each wants, and this module fetches exactly those - one
+request per distinct timeframe per symbol, not one per strategy. By default
+every strategy reads 15-minute candles, so that is one request per symbol;
+STRATEGY_TIMEFRAMES can put a strategy on its own clock in the same pass.
 
 SCHEDULING REALITY
 ------------------
@@ -194,10 +194,10 @@ def readPositions(client, symbols):
     """symbol -> position dict, or None. One request for the whole account.
 
     Bybit returns every linear position for a settle coin in one response, so
-    forty symbols cost one call rather than forty. The per-symbol loop is kept
-    as a fallback and is genuinely needed: if this silently returned nothing
-    on error, the bot would believe it is flat everywhere and open a second
-    position on top of every one it already holds.
+    the whole symbol list costs one call, not one per symbol. The per-symbol
+    loop is kept as a fallback and is genuinely needed: if this silently
+    returned nothing on error, the bot would believe it is flat everywhere
+    and open a second position on top of every one it already holds.
     """
     held = dict.fromkeys(symbols)
     try:

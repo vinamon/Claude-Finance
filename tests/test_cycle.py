@@ -99,5 +99,22 @@ class ClosedPositionReport(unittest.TestCase):
         self.assertEqual(len(client.created_orders), 1)
 
 
+class ConfigurationWarnings(unittest.TestCase):
+    def testMixedClocksWithoutPerStrategyCapsAreWarnedAbout(self):
+        # A 15-minute rule fires far more often than an hourly one and takes
+        # every slot first unless the strategies are budgeted separately.
+        cycle = runCycle(FakeBybit(), strategy_timeframes={"trend": "1h"},
+                         max_open_per_strategy={})
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertIn("CONFIG WARNING: STRATEGY_TIMEFRAMES", cycle.output)
+        self.assertIn("MAX_OPEN_PER_STRATEGY", cycle.output)
+
+    def testOneClockIsNotWarnedAbout(self):
+        cycle = runCycle(FakeBybit())
+
+        self.assertNotIn("CONFIG WARNING", cycle.output)
+
+
 if __name__ == "__main__":
     unittest.main()
