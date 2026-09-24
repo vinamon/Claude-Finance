@@ -363,3 +363,17 @@ puts the full URL into its exception messages.
 `.gitignore` masks `.env.*` as well as `.env`, negating `.env.example` back
 in. Plain `.env` does not cover `.env.backup` or `.env.local`, and this
 repository is public.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are GitHub issues in vinamon/Claude-Finance. A bare number, as in `implement 12`, means issue #12. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root, created only when a term or decision is settled. See `docs/agents/domain.md`.
