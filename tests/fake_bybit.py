@@ -121,20 +121,25 @@ class FakeBybit:
     """The part of ccxt's Bybit client a cycle touches.
 
     `last_price` is what the ticker reports; None means the close of the
-    newest candle. `orders` maps an order id to the row Bybit's order history
-    returns for it.
+    newest candle. `ticker`, when given, is returned whole instead, for a
+    ticker that carries no usable price at all. `orders` maps an order id to
+    the row Bybit's order history returns for it. `tick` and `qty_step` are
+    every market's instrument filters; the defaults suit an ETH-sized price,
+    a coin priced in cents needs a finer tick.
     """
 
     def __init__(self, symbols=("ETH/USDT:USDT",), bars=None, positions=None,
-                 closed=None, closed_error=None, last_price=None, orders=None):
+                 closed=None, closed_error=None, last_price=None, orders=None,
+                 tick="0.01", qty_step="0.01", ticker=None):
         self.urls = {"api": {"private": "https://api-demo.bybit.com"}}
         self.options = {}
-        self.markets = {symbol: market(symbol) for symbol in symbols}
+        self.markets = {symbol: market(symbol, tick, qty_step) for symbol in symbols}
         self.bars = bars if bars is not None else candles()
         self.positions = list(positions or [])
         self.closed = list(closed or [])
         self.closed_error = closed_error
         self.last_price = last_price
+        self.ticker = ticker
         self.orders = dict(orders or {})
         self.created_orders = []
         self.trading_stops = []
@@ -156,7 +161,9 @@ class FakeBybit:
     def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params=None):
         return self.bars[-limit:] if limit else list(self.bars)
 
-    def fetch_ticker(self, symbol):
+    def fetch_ticker(self, symbol, params=None):
+        if self.ticker is not None:
+            return dict(self.ticker)
         last = self.last_price if self.last_price is not None else self.bars[-1][4]
         return {"symbol": symbol, "last": last}
 

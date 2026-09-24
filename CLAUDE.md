@@ -234,6 +234,42 @@ per-trade rather than a smaller number:
 Do not "simplify" either of these away, and do not raise `LEVERAGE` without
 re-measuring ATR across the whole symbol list.
 
+## Stops are measured from the live price
+
+**Measured live, not theorised.** Signals read closed candles, and the stop
+used to be measured from the last one's close as well - a price up to a whole
+bar old. On 2026-09-15 ARB's stop was measured from a close of 0.14991 and
+came out at 0.14491, 0.005 (3.3%) below it. The first fill was 0.14703: the
+market had already fallen 1.9% since that close, so the stop sat 0.00212
+(1.4%) under the fill and was hit three minutes later. Three more entries
+followed within nine minutes with the same stop, filling 0.00016, 0.00064
+and 0 above it; the last, at 0.14491, sat on the stop itself and was stopped
+out the same second. Then Bybit rejected the orders outright ("StopLoss ...
+should lower than base_price").
+
+So `executor.execute()` reads the ticker's last trade right before sizing,
+and the size, stop, target, trail, liquidation cap and minimum-stop check are
+all measured from it. The fill price itself cannot be used: SL/TP ride on the
+order and must be known before it exists, which is what keeps a position from
+ever being naked. The last trade is the nearest honest stand-in. The candle
+close is still passed in, and only logged.
+
+Signals and ATR still come from closed candles only. This moves where the
+stop is measured from, not how signals are computed.
+
+**No price, no trade.** A ticker without a usable last price (missing, zero,
+not a number) skips the entry with a logged reason. There is deliberately no
+fallback to the candle close: that close is exactly the stale price this
+replaced. The skip is not a failed run; the next cycle asks again. A ticker
+request that raises is a different thing and fails the symbol like any other
+exchange call that raises.
+
+The entry log line prints both prices and the move between them,
+`@~0.147030 live, last close 0.149910 (-1.92%)`, so a stale signal shows.
+`tests/test_cycle.py` replays the ARB numbers: measured from 0.14991 at 15x
+the capped stop is exactly the 0.14491 ARB was sent with; measured from
+0.14703 it is 0.14212.
+
 ## Four strategies on one clock
 
 The owner asked for a fast bot: many entries a day on 15-minute candles, not a

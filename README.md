@@ -415,6 +415,44 @@ przypadkiem. Na symbolu o ATR równym 13% ceny nie istnieje stop, który
 jednocześnie mieści się w likwidacji przy 15x i cokolwiek znaczy — i uczciwą
 odpowiedzią jest nie brać tej transakcji.
 
+### Stop liczony od bieżącej ceny, nie od ostatniej świecy
+
+Sygnały liczone są na zamkniętych świecach i dawniej stop też był liczony od
+zamknięcia ostatniej z nich — czyli od ceny sprzed nawet całej świecy. Rynek
+w tym czasie nie czeka.
+
+Złapane na tym koncie 2026-09-15:
+
+```
+ARB   zamkniecie swiecy   0.14991
+      stop loss           0.14491   (3,3% pod zamknieciem, tak mialo byc)
+      wypelnienie         0.14703   (rynek juz 1,9% nizej)
+      -> stop tylko 1,4% pod wejsciem, trafiony po 3 minutach
+```
+
+W ciągu dziewięciu minut bot wszedł jeszcze trzy razy z tym samym stopem.
+Ostatnie z tych wejść wypełniło się po 0.14491, czyli dokładnie na stopie, i
+wyleciało w tej samej sekundzie. Potem Bybit zaczął odrzucać zlecenia
+(*"StopLoss ... should lower than base_price"*).
+
+Teraz bot tuż przed wejściem pyta giełdę o **cenę ostatniej transakcji**
+(ticker) i od niej liczy wszystko: wielkość pozycji, stop, cel, trailing,
+przycięcie do likwidacji i próg 1×ATR. Ceny wypełnienia użyć się nie da, bo SL
+i TP są doklejone do samego zlecenia, więc muszą być znane, zanim ono powstanie
+— dzięki temu pozycja ani przez chwilę nie jest bez ochrony. Bieżąca cena to
+najbliższe uczciwe przybliżenie.
+
+Co się **nie** zmieniło: sygnały i ATR nadal liczone są wyłącznie na
+zamkniętych świecach. Zmieniło się tylko to, od czego mierzony jest stop.
+
+**Nie ma ceny, nie ma transakcji.** Jeśli ticker nie poda użytecznej ceny, bot
+pomija wejście i zapisuje powód w logu. Celowo nie wraca do zamknięcia świecy,
+bo to właśnie ta nieaktualna cena narobiła szkód. To nie jest błąd przebiegu:
+następny cykl zapyta ponownie.
+
+W logu wejścia widać obie ceny i to, o ile rynek zdążył się ruszyć, np.
+`@~0.147030 live, last close 0.149910 (-1.92%)`.
+
 ### Skąd się wzięła lista dziesięciu symboli
 
 Dziesięć kontraktów krypto o największym obrocie 24h, odczytanych wprost z

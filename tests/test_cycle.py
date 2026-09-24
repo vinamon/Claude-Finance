@@ -51,6 +51,74 @@ class ForcedEntry(unittest.TestCase):
         self.assertIn("strategy trend", opened[0]["message"])
 
 
+# ARB on 2026-09-15: the last closed candle said 0.14991, and by the time the
+# order went out the market was at 0.14703. A tick fine enough for the
+# five-decimal prices ARB traded at.
+arb = dict(symbols=("ARB/USDT:USDT",), tick="0.00001", qty_step="0.1")
+
+# Every bar closes at 0.14991 and spans 0.14941-0.15041, so ATR is 0.001.
+arb_candles = dict(close=0.14991, half_range=0.0005)
+
+
+class LivePriceEntry(unittest.TestCase):
+    def testTheStopIsMeasuredFromTheLivePriceNotTheLastClosedCandle(self):
+        client = FakeBybit(bars=candles(**arb_candles), last_price=0.14703, **arb)
+
+        cycle = runCycle(client, force_entry=True, **risk)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        order = client.created_orders[0]
+        # stop 0.14703 - 3 x 0.001, target 0.14703 + 6 x 0.001. Measured from
+        # the candle, the stop would have sat 0.00013 under the fill.
+        self.assertEqual(order["params"]["stopLoss"]["triggerPrice"], 0.14403)
+        self.assertEqual(order["params"]["takeProfit"]["triggerPrice"], 0.15303)
+        # 450 USDT at 0.14703, rounded down to the 0.1 lot step
+        self.assertEqual(order["amount"], 3060.5)
+        # the trail arms 3 ATR above the live price as well
+        self.assertIn("activation=0.15003", cycle.output)
+
+    def testTheEntryLogShowsTheLastCloseAndTheLivePrice(self):
+        client = FakeBybit(bars=candles(**arb_candles), last_price=0.14703, **arb)
+
+        cycle = runCycle(client, force_entry=True, **risk)
+
+        opening = [line for line in cycle.output.splitlines() if "opening long" in line]
+        self.assertEqual(len(opening), 1, cycle.output)
+        # how far the market moved between the signal and the order
+        self.assertIn("@~0.147030 live, last close 0.149910 (-1.92%)", opening[0])
+
+    def testTheLiquidationCapIsMeasuredFromTheLivePrice(self):
+        # ATR 0.002 at 15x, as ARB was traded: the 3 ATR stop (0.006) is wider
+        # than half the distance to liquidation, so the cap decides. Measured
+        # from the candle close the cap gives 0.14491, the very stop ARB was
+        # sent with four times on 2026-09-15.
+        client = FakeBybit(bars=candles(close=0.14991, half_range=0.001),
+                           last_price=0.14703, **arb)
+
+        cycle = runCycle(client, force_entry=True, **dict(risk, leverage=15))
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        # 0.14703 - 0.14703 / 15 / 2, rounded down to the tick
+        self.assertEqual(client.created_orders[0]["params"]["stopLoss"]["triggerPrice"], 0.14212)
+        self.assertIn("ARB/USDT:USDT: stop capped", cycle.output)
+
+    def testWithoutALivePriceNothingIsBought(self):
+        # Bybit answered, but with no last trade. The candle close is right
+        # there and is exactly the guess that put ARB's stop under its fill.
+        client = FakeBybit(bars=candles(**flat_2000),
+                           ticker={"symbol": "ETH/USDT:USDT", "last": None})
+
+        cycle = runCycle(client, force_entry=True, **risk)
+
+        # a skipped entry, not a failed run
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertNotIn("Bot error", [push["title"] for push in cycle.pushes])
+        self.assertEqual(client.created_orders, [])
+        self.assertIn("ETH/USDT:USDT: no entry - no usable live price", cycle.output)
+
+
 def closedRecord(order_id="close-1", symbol="ETHUSDT"):
     """One row of Bybit's /v5/position/closed-pnl, shaped like the real ones
     read off the demo account."""
