@@ -566,6 +566,13 @@ def warnings():
             "position slot before the slower rule reaches one; give each strategy a "
             "budget." % " and ".join(clocks)
         )
+    if 0 < reentry_cooldown_bars < signal_lookback_bars:
+        notes.append(
+            "REENTRY_COOLDOWN_BARS (%d) is shorter than SIGNAL_LOOKBACK_BARS (%d), so a "
+            "symbol is let back in while the signal behind its last trade is still live, "
+            "and that signal is bought again. Match them to trade each signal once."
+            % (reentry_cooldown_bars, signal_lookback_bars)
+        )
     if not regime_filter and strategy == "multi" and len(active_strategies) > 1:
         notes.append(
             "REGIME_FILTER is off while several strategies run together. Mean reversion "

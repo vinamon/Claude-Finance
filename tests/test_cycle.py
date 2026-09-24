@@ -185,6 +185,18 @@ class ClosedPositionReport(unittest.TestCase):
 
         self.assertNotIn("Closed ETHUSDT", [push["title"] for push in second.pushes])
 
+    def testEveryCloseStillInTheWindowStaysAnnouncedHoweverManyThereAre(self):
+        # Bybit's order ids are random, so no ordering of them says which close
+        # is old. More closes than the file ever held before, none pushed twice.
+        ids = ["%08x-close" % (i * 2654435761 % 2 ** 32) for i in range(600)]
+        client = FakeBybit(closed=[closedRecord(order_id=order_id) for order_id in ids])
+        first = runCycle(client)
+
+        second = runCycle(client, state_dir=first.state_dir)
+
+        self.assertEqual(len(first.pushes), 600)
+        self.assertEqual(len(second.pushes), 0)
+
     def testAFailedReadOfTheCloseHistoryDoesNotStopTheCycle(self):
         client = FakeBybit(bars=candles(**flat_2000), closed_error=RuntimeError("closed-pnl is down"))
 
@@ -255,6 +267,13 @@ class CloseCause(unittest.TestCase):
         self.assertEqual(len(closes), 1, cycle.pushes)
         self.assertIn("why: closed outside the bot (CreateByClosing)",
                       closes[0]["message"].splitlines())
+
+    def testAnOutsideCloseWithoutACreateTypeSaysSoWithoutEmptyBrackets(self):
+        client = FakeBybit(closed=[closedRecord()], orders={"close-1": closingOrder()})
+
+        cycle = runCycle(client)
+
+        self.assertIn("why: closed outside the bot", closePushes(cycle)[0]["message"].splitlines())
 
     def testACloseAlreadyAnnouncedIsNotLookedUpAgain(self):
         # The close stays inside the lookback window for several cycles; only
@@ -406,6 +425,15 @@ class ConfigurationWarnings(unittest.TestCase):
         self.assertEqual(cycle.exit_code, 0, cycle.output)
         self.assertIn("CONFIG WARNING: STRATEGY_TIMEFRAMES", cycle.output)
         self.assertIn("MAX_OPEN_PER_STRATEGY", cycle.output)
+
+    def testACooldownShorterThanTheSignalWindowIsWarnedAbout(self):
+        # The signal behind a stopped-out trade would still be in the window
+        # when the symbol is let back in, and would be bought again.
+        cycle = runCycle(FakeBybit(), reentry_cooldown_bars=1, signal_lookback_bars=3)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertIn("CONFIG WARNING: REENTRY_COOLDOWN_BARS (1) is shorter than "
+                      "SIGNAL_LOOKBACK_BARS (3)", cycle.output)
 
     def testOneClockIsNotWarnedAbout(self):
         cycle = runCycle(FakeBybit())

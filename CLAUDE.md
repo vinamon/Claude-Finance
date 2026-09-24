@@ -89,7 +89,7 @@ match wins:
 | `execType=BustTrade` on the closed-pnl row itself | `liquidation`, with no lookup |
 | the closing order's `stopOrderType` is `StopLoss` / `TakeProfit` / `TrailingStop` | `stop loss` / `take profit` / `trailing stop` |
 | its `orderLinkId` starts with `ORDER_LINK_PREFIX` and a dash | `bot exit` |
-| anything else | `closed outside the bot (<createType>)` |
+| anything else | `closed outside the bot (<createType>)`, no brackets when Bybit sends none |
 | the lookup raised, or found no order | `unknown` |
 
 The closing order is read from `/v5/order/history` by the `orderId` on the
@@ -104,13 +104,22 @@ The order of the checks matters. Liquidation is read off the row so the worst
 outcome is named even when the lookup fails. The stop type is checked before
 the prefix, so an exchange-side stop is never reported as a bot exit whatever
 `orderLinkId` the triggered order carries. The prefix, not `createType`, is
-what marks an order as the bot's: the bot tags every order it sends.
+what marks an order as the bot's: the bot tags every order it sends, and
+`executor.isBotOrderLinkId()` sits beside the function that builds the tag so
+the two cannot drift apart.
 
 The lookup runs only for a close announced for the first time, after the
 `state/notified.json` check, so a close that stays inside the lookback window
 costs one request, not one per cycle. A failed lookup is logged and reported
 as `unknown`; it never costs the push. Other exchange-side closes, such as
 auto-deleveraging, are not special-cased and land in the last two rows.
+
+`state/notified.json` keeps exactly the closes the latest read returned,
+nothing older: a close that has left the window cannot be read again, so
+forgetting it is free. It used to keep the last 500 ids in sorted order, but
+Bybit's order ids are random, so past 500 it dropped fresh closes instead of
+old ones, and each dropped close was pushed and looked up again every cycle
+for as long as it stayed in the window.
 
 ## Why not GitHub Actions
 
@@ -276,11 +285,10 @@ used to be measured from the last one's close as well - a price up to a whole
 bar old. On 2026-09-15 ARB's stop was measured from a close of 0.14991 and
 came out at 0.14491, 0.005 (3.3%) below it. The first fill was 0.14703: the
 market had already fallen 1.9% since that close, so the stop sat 0.00212
-(1.4%) under the fill and was hit three minutes later. Three more entries
-followed within nine minutes with the same stop, filling 0.00016, 0.00064
-and 0 above it; the last, at 0.14491, sat on the stop itself and was stopped
-out the same second. Then Bybit rejected the orders outright ("StopLoss ...
-should lower than base_price").
+(1.4%) under the fill and was hit three minutes later. The re-entries that
+followed filled ever closer to the same stop, the last one on it exactly (the
+sequence is in "One signal, one trade"), and then Bybit rejected the orders
+outright ("StopLoss ... should lower than base_price").
 
 So `executor.execute()` reads the ticker's last trade right before sizing,
 and the size, stop, target, trail, liquidation cap and minimum-stop check are
@@ -455,8 +463,8 @@ to the row above:
 The chosen set made about 25 trades a day, won 46% of them, held a position
 about three hours on average, and averaged +0.07% per trade after fees. The
 re-entry cooldown is part of it and is its own setting,
-`REENTRY_COOLDOWN_BARS=3` (see "One signal, one trade"). Each change was kept only because it helped in BOTH
-halves, not merely overall. Dropping `scalp` helped one half and hurt the
+`REENTRY_COOLDOWN_BARS=3` (see "One signal, one trade"). Each change was kept
+only because it helped in BOTH halves, not merely overall. Dropping `scalp` helped one half and hurt the
 other, so it stays. The bot is long-only: in a falling market it still loses,
 and no parameter here changes that. The replay did not model the trailing
 stop, slippage, or the refusal of trades whose capped stop is under one ATR.

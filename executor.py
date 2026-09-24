@@ -407,6 +407,11 @@ def buildOrderLinkId(market_id, strategy=None, bucket_seconds=None):
     return "%s-%s-%s-%d" % (config.order_link_prefix, trimmed, tag, bucket)
 
 
+def isBotOrderLinkId(order_link_id):
+    """True when an orderLinkId was built by buildOrderLinkId above."""
+    return (order_link_id or "").startswith(config.order_link_prefix + "-")
+
+
 # ---------------------------------------------------------------------------
 # leverage
 # ---------------------------------------------------------------------------

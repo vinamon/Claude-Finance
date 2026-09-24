@@ -112,16 +112,16 @@ zachowania to edycja `.env` i restart, nigdy edycja pliku `.py`.
 
 W skrócie: `DUMMY_MODE`, `AUTOSTART`, `LOOP_INTERVAL_MINUTES`, `SYMBOLS`,
 `STRATEGY`, `ACTIVE_STRATEGIES`, `MIN_ENTRY_VOTES`, `MAX_OPEN_POSITIONS`,
-`POSITION_NOTIONAL_USDT`, `LEVERAGE`, `ENTRY_TIMEFRAME`, `EXIT_TIMEFRAME`
-(pomiń, żeby dziedziczyło), `SIGNAL_LOOKBACK_BARS`, `REGIME_FILTER`,
-`REGIME_PERIOD`, `EXIT_ON_REGIME_BREAK`, `UNKNOWN_OWNER_EXIT`,
+`REENTRY_COOLDOWN_BARS`, `POSITION_NOTIONAL_USDT`, `LEVERAGE`,
+`ENTRY_TIMEFRAME`, `EXIT_TIMEFRAME` (pomiń, żeby dziedziczyło),
+`SIGNAL_LOOKBACK_BARS`, `REGIME_FILTER`, `REGIME_PERIOD`,
+`EXIT_ON_REGIME_BREAK`, `UNKNOWN_OWNER_EXIT`,
 `EMA_FAST_PERIOD`, `EMA_SLOW_PERIOD`, `ADX_PERIOD`, `ADX_MIN`, `RSI_PERIOD`,
 `RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `MEANREV_EXIT_SMA_PERIOD`,
 `BREAKOUT_LOOKBACK`, `BREAKOUT_EXIT_LOOKBACK`, `RISK_MODEL`, `ATR_PERIOD`,
 `ATR_STOP_MULT`, `ATR_TARGET_MULT`, `ATR_TRAIL_MULT`,
 `ATR_TRAIL_ACTIVATION_MULT`, `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`,
-`TRAILING_STOP_PCT`, `TRAILING_ACTIVATION_PCT`, `CLOSED_LOOKBACK_MINUTES`,
-`REENTRY_COOLDOWN_BARS`.
+`TRAILING_STOP_PCT`, `TRAILING_ACTIVATION_PCT`, `CLOSED_LOOKBACK_MINUTES`.
 
 `SYMBOLS` jest listą po przecinku, w formacie ccxt:
 `BTC/USDT:USDT,ETH/USDT:USDT`
@@ -431,9 +431,9 @@ ARB   zamkniecie swiecy   0.14991
       -> stop tylko 1,4% pod wejsciem, trafiony po 3 minutach
 ```
 
-W ciągu dziewięciu minut bot wszedł jeszcze trzy razy z tym samym stopem.
-Ostatnie z tych wejść wypełniło się po 0.14491, czyli dokładnie na stopie, i
-wyleciało w tej samej sekundzie. Potem Bybit zaczął odrzucać zlecenia
+Kolejne wejścia z tym samym stopem wypełniały się coraz bliżej niego, ostatnie
+dokładnie na nim (cała sekwencja jest w *Jeden sygnał, jedna transakcja*).
+Potem Bybit zaczął odrzucać zlecenia
 (*"StopLoss ... should lower than base_price"*).
 
 Teraz bot tuż przed wejściem pyta giełdę o **cenę ostatniej transakcji**
@@ -449,7 +449,9 @@ zamkniętych świecach. Zmieniło się tylko to, od czego mierzony jest stop.
 **Nie ma ceny, nie ma transakcji.** Jeśli ticker nie poda użytecznej ceny, bot
 pomija wejście i zapisuje powód w logu. Celowo nie wraca do zamknięcia świecy,
 bo to właśnie ta nieaktualna cena narobiła szkód. To nie jest błąd przebiegu:
-następny cykl zapyta ponownie.
+następny cykl zapyta ponownie. Co innego, gdy samo zapytanie o ticker się
+wysypie (sieć, giełda nie odpowiada): wtedy ten symbol kończy się błędem, jak
+przy każdym innym nieudanym zapytaniu do giełdy, i przebieg jest czerwony.
 
 W logu wejścia widać obie ceny i to, o ile rynek zdążył się ruszyć, np.
 `@~0.147030 live, last close 0.149910 (-1.92%)`.
@@ -601,9 +603,10 @@ błędzie krytycznym.
 
 Zamknięcia bot wykrywa odpytując `/v5/position/closed-pnl` za ostatnie
 `CLOSED_LOOKBACK_MINUTES`. Żeby to samo zamknięcie nie waliło ci w telefon na
-każdym runie przez cały okres okna, lista już zgłoszonych ID jedzie między
-runami w `actions/cache`. To **czysta kosmetyka** — pudło w cache kosztuje
-duplikat powiadomienia, nigdy duplikat transakcji. Jeśli chcesz to wyłączyć,
+każdym runie przez cały okres okna, lista już zgłoszonych ID leży w
+`state/notified.json`. Plik trzyma dokładnie te zamknięcia, które zwrócił
+ostatni odczyt — starsze wypadły z okna i nie wrócą. To **czysta kosmetyka**
+— zgubiony plik kosztuje duplikat powiadomienia, nigdy duplikat transakcji. Jeśli chcesz to wyłączyć,
 ustaw `NOTIFIED_STATE_FILE=""`.
 
 ### Dlaczego pozycja się zamknęła
@@ -619,7 +622,7 @@ powiadomienia (`why: ...`). Nie trzeba już grzebać w historii zleceń Bybita.
 | `trailing stop` | zadziałał trailing stop |
 | `liquidation` | **likwidacja**: giełda sama zamknęła pozycję i zabrała cały depozyt |
 | `bot exit` | bot zamknął pozycję, bo reguła strategii kazała wyjść (przychodzi wtedy też osobny push "Exit signal" z powodem) |
-| `closed outside the bot (...)` | zamknięte poza botem, np. ręcznie w aplikacji Bybita; w nawiasie Bybit podaje, skąd przyszło zlecenie (`CreateByClosing` to przycisk zamknięcia pozycji) |
+| `closed outside the bot (...)` | zamknięte poza botem, np. ręcznie w aplikacji Bybita; w nawiasie Bybit podaje, skąd przyszło zlecenie (`CreateByClosing` to przycisk zamknięcia pozycji); bez nawiasu, jeśli tego nie poda |
 | `unknown` | nie udało się tego sprawdzić |
 
 Skąd bot to wie: likwidację Bybit zaznacza wprost w rekordzie zamknięcia
