@@ -146,7 +146,7 @@ def fetchClosedPositions(client):
     return ((response or {}).get("result") or {}).get("list") or []
 
 
-def reportClosedPositions(rows, notified):
+def reportClosedPositions(client, rows, notified):
     """Announce positions Bybit closed on its own since we last looked."""
     log("closed-position check: %d record(s) in the last %d minute(s)"
         % (len(rows), config.closed_lookback_minutes))
@@ -161,21 +161,75 @@ def reportClosedPositions(rows, notified):
             "avg_entry": row.get("avgEntryPrice"),
             "avg_exit": row.get("avgExitPrice"),
             "closed_pnl": toFloat(row.get("closedPnl")),
+            # Looked up only here, after the notified check, so a close costs
+            # one order-history request the first time it is seen and none on
+            # every later cycle that still finds it inside the window.
+            "cause": closeCause(client, row),
         }
         log(
-            "position closed: %s qty=%s entry=%s exit=%s pnl=%s"
+            "position closed: %s qty=%s entry=%s exit=%s pnl=%s why=%s"
             % (
                 record["symbol"],
                 record["qty"],
                 record["avg_entry"],
                 record["avg_exit"],
                 record["closed_pnl"],
+                record["cause"],
             )
         )
         notify.positionClosed(record)
         notified.add(key)
 
     return notified
+
+
+# Bybit's stopOrderType on the order that closed a position, for the three
+# kinds of exit the bot attaches to every entry.
+stop_causes = {
+    "StopLoss": "stop loss",
+    "TakeProfit": "take profit",
+    "TrailingStop": "trailing stop",
+}
+
+
+def closeCause(client, row):
+    """Why a position closed, in words, from one closed-pnl row.
+
+    The closed-pnl row itself only says "a position closed at this price".
+    The order that closed it, looked up by its id in the order history, says
+    who sent it. Never raises: a close that cannot be explained is still a
+    close worth reporting, so a failed lookup is "unknown", not a lost push.
+    """
+    # The liquidation engine's fill is marked on the close record itself, so
+    # the worst outcome is named even when the lookup below would fail.
+    if row.get("execType") == "BustTrade":
+        return "liquidation"
+
+    symbol = row.get("symbol")
+    order_id = row.get("orderId")
+    try:
+        response = client.privateGetV5OrderHistory(
+            {"category": config.category, "orderId": order_id})
+    except Exception as error:
+        log("could not look up why %s closed (order %s): %s" % (symbol, order_id, error))
+        return "unknown"
+    orders = ((response or {}).get("result") or {}).get("list") or []
+    if not orders:
+        log("could not look up why %s closed: order %s is not in Bybit's order history"
+            % (symbol, order_id))
+        return "unknown"
+    order = orders[0]
+
+    stop_type = order.get("stopOrderType")
+    if stop_type in stop_causes:
+        return stop_causes[stop_type]
+    # Every order the bot sends carries its prefix in orderLinkId, and the
+    # only closing orders it sends are its own exits.
+    if (order.get("orderLinkId") or "").startswith(config.order_link_prefix + "-"):
+        return "bot exit"
+    # A hand-made order, a close from Bybit's interface, anything else.
+    # createType is how Bybit itself says where the order came from.
+    return "closed outside the bot (%s)" % order.get("createType")
 
 
 def toFloat(value):
@@ -383,7 +437,7 @@ def run():
     notified = loadNotified()
     closed_rows = fetchClosedPositions(client)
     if closed_rows is not None:
-        notified = reportClosedPositions(closed_rows, notified)
+        notified = reportClosedPositions(client, closed_rows, notified)
     saveNotified(notified)
 
     if not config.symbols:

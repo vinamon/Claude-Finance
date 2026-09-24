@@ -123,14 +123,15 @@ class FakeBybit:
     `last_price` is what the ticker reports; None means the close of the
     newest candle. `ticker`, when given, is returned whole instead, for a
     ticker that carries no usable price at all. `orders` maps an order id to
-    the row Bybit's order history returns for it. `tick` and `qty_step` are
-    every market's instrument filters; the defaults suit an ETH-sized price,
-    a coin priced in cents needs a finer tick.
+    the row Bybit's order history returns for it, and `order_history_error`,
+    when set, is raised by every order-history request instead. `tick` and
+    `qty_step` are every market's instrument filters; the defaults suit an
+    ETH-sized price, a coin priced in cents needs a finer tick.
     """
 
     def __init__(self, symbols=("ETH/USDT:USDT",), bars=None, positions=None,
                  closed=None, closed_error=None, last_price=None, orders=None,
-                 tick="0.01", qty_step="0.01", ticker=None):
+                 order_history_error=None, tick="0.01", qty_step="0.01", ticker=None):
         self.urls = {"api": {"private": "https://api-demo.bybit.com"}}
         self.options = {}
         self.markets = {symbol: market(symbol, tick, qty_step) for symbol in symbols}
@@ -141,6 +142,7 @@ class FakeBybit:
         self.last_price = last_price
         self.ticker = ticker
         self.orders = dict(orders or {})
+        self.order_history_error = order_history_error
         self.created_orders = []
         self.trading_stops = []
         self.closed_requests = []
@@ -188,6 +190,8 @@ class FakeBybit:
 
     def privateGetV5OrderHistory(self, request):
         self.order_history_requests.append(dict(request))
+        if self.order_history_error is not None:
+            raise self.order_history_error
         order = self.orders.get(request.get("orderId"))
         return {"result": {"list": [order] if order else []}}
 

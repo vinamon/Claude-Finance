@@ -77,6 +77,41 @@ rather than quietly trading a size nobody asked for.
 **`POSITION_NOTIONAL_USDT` is notional, not margin.** It is `qty * price`.
 Margin used is roughly notional / leverage.
 
+## Every closed position says why it closed
+
+The "position closed" log line ends in `why=<cause>` and the phone push in a
+`why: <cause>` line, so a loss can be read without a trip through Bybit's
+order history. `main.closeCause()` decides it for each closed-pnl row, first
+match wins:
+
+| Evidence | Cause |
+|---|---|
+| `execType=BustTrade` on the closed-pnl row itself | `liquidation`, with no lookup |
+| the closing order's `stopOrderType` is `StopLoss` / `TakeProfit` / `TrailingStop` | `stop loss` / `take profit` / `trailing stop` |
+| its `orderLinkId` starts with `ORDER_LINK_PREFIX` and a dash | `bot exit` |
+| anything else | `closed outside the bot (<createType>)` |
+| the lookup raised, or found no order | `unknown` |
+
+The closing order is read from `/v5/order/history` by the `orderId` on the
+closed-pnl row. These values were checked against real orders on the demo
+account, not only the docs: the ARB stops of 2026-09-15 show
+`stopOrderType=StopLoss` and `createType=CreateByStopLoss`; the bot's own
+close has `orderLinkId` `cf-ARBUSDT-c-…`; the XRP liquidation of 2026-09-19
+shows `execType=BustTrade` and `createType=CreateByTakeOver_PassThrough`; a
+manual close in Bybit's interface shows `createType=CreateByClosing`.
+
+The order of the checks matters. Liquidation is read off the row so the worst
+outcome is named even when the lookup fails. The stop type is checked before
+the prefix, so an exchange-side stop is never reported as a bot exit whatever
+`orderLinkId` the triggered order carries. The prefix, not `createType`, is
+what marks an order as the bot's: the bot tags every order it sends.
+
+The lookup runs only for a close announced for the first time, after the
+`state/notified.json` check, so a close that stays inside the lookback window
+costs one request, not one per cycle. A failed lookup is logged and reported
+as `unknown`; it never costs the push. Other exchange-side closes, such as
+auto-deleveraging, are not special-cased and land in the last two rows.
+
 ## Why not GitHub Actions
 
 Bybit fronts its API with CloudFront and geo-blocks the country GitHub's

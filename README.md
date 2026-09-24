@@ -565,6 +565,33 @@ runami w `actions/cache`. To **czysta kosmetyka** — pudło w cache kosztuje
 duplikat powiadomienia, nigdy duplikat transakcji. Jeśli chcesz to wyłączyć,
 ustaw `NOTIFIED_STATE_FILE=""`.
 
+### Dlaczego pozycja się zamknęła
+
+Każde zamknięcie mówi, co je spowodowało: w logu na końcu linii
+`position closed: ...` (`why=...`), a w telefonie w ostatniej linijce
+powiadomienia (`why: ...`). Nie trzeba już grzebać w historii zleceń Bybita.
+
+| `why:` | Co się stało |
+|---|---|
+| `stop loss` | zadziałał stop loss ustawiony przy wejściu |
+| `take profit` | cena doszła do celu |
+| `trailing stop` | zadziałał trailing stop |
+| `liquidation` | **likwidacja**: giełda sama zamknęła pozycję i zabrała cały depozyt |
+| `bot exit` | bot zamknął pozycję, bo reguła strategii kazała wyjść (przychodzi wtedy też osobny push "Exit signal" z powodem) |
+| `closed outside the bot (...)` | zamknięte poza botem, np. ręcznie w aplikacji Bybita; w nawiasie Bybit podaje, skąd przyszło zlecenie (`CreateByClosing` to przycisk zamknięcia pozycji) |
+| `unknown` | nie udało się tego sprawdzić |
+
+Skąd bot to wie: likwidację Bybit zaznacza wprost w rekordzie zamknięcia
+(`execType=BustTrade`). W pozostałych przypadkach bot raz dopytuje historię
+zleceń o zlecenie, które zamknęło pozycję, i patrzy, kto je wysłał. Zlecenia
+bota mają w `orderLinkId` jego prefiks (`ORDER_LINK_PREFIX`, domyślnie `cf`),
+więc da się je odróżnić od twoich ręcznych. Te wartości sprawdzono na
+prawdziwych zleceniach z konta demo, nie tylko w dokumentacji.
+
+Każde zamknięcie jest sprawdzane tylko raz, przy pierwszym zgłoszeniu. Jeśli
+sprawdzenie się nie uda, powiadomienie i tak przychodzi, tylko z
+`why: unknown` — brak powodu nie może zjeść informacji o zamknięciu.
+
 ---
 
 ## GitHub Actions: dlaczego nie

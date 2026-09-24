@@ -134,9 +134,35 @@ def closedRecord(order_id="close-1", symbol="ETHUSDT"):
     }
 
 
+def closingOrder(order_id="close-1", stop_order_type="", create_type="", order_link_id=""):
+    """The row Bybit's /v5/order/history returns for the order that closed a
+    position. Three of its fields say who closed it; each test sets only the
+    ones it needs, to values read off real orders on the demo account."""
+    return {
+        "orderId": order_id,
+        "symbol": "ETHUSDT",
+        "side": "Sell",
+        "orderType": "Market",
+        "orderStatus": "Filled",
+        "reduceOnly": True,
+        "stopOrderType": stop_order_type,
+        "createType": create_type,
+        "orderLinkId": order_link_id,
+    }
+
+
+def stopLossOrder():
+    """As on the ARB stops of 2026-09-15."""
+    return closingOrder(stop_order_type="StopLoss", create_type="CreateByStopLoss")
+
+
+def closePushes(cycle, symbol="ETHUSDT"):
+    return [push for push in cycle.pushes if push["title"] == "Closed %s" % symbol]
+
+
 class ClosedPositionReport(unittest.TestCase):
     def testACloseIsLoggedAndPushedFromOneReadOfTheCloseHistory(self):
-        client = FakeBybit(closed=[closedRecord()])
+        client = FakeBybit(closed=[closedRecord()], orders={"close-1": stopLossOrder()})
 
         cycle = runCycle(client)
 
@@ -147,7 +173,8 @@ class ClosedPositionReport(unittest.TestCase):
                       cycle.output)
         closes = [push for push in cycle.pushes if push["title"] == "Closed ETHUSDT"]
         self.assertEqual(len(closes), 1)
-        self.assertEqual(closes[0]["message"], "qty 0.22\nentry 2000 -> exit 1940\npnl -13.2 USDT")
+        self.assertEqual(closes[0]["message"],
+                         "qty 0.22\nentry 2000 -> exit 1940\npnl -13.2 USDT\nwhy: stop loss")
 
     def testACloseAlreadyAnnouncedIsNotPushedAgain(self):
         client = FakeBybit(closed=[closedRecord()])
@@ -165,6 +192,110 @@ class ClosedPositionReport(unittest.TestCase):
         self.assertEqual(cycle.exit_code, 0, cycle.output)
         self.assertIn("could not fetch closed positions: closed-pnl is down", cycle.output)
         self.assertEqual(len(client.created_orders), 1)
+
+
+class CloseCause(unittest.TestCase):
+    def testAStopLossIsNamedInTheLogAndOnThePhone(self):
+        client = FakeBybit(closed=[closedRecord()], orders={"close-1": stopLossOrder()})
+
+        cycle = runCycle(client)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.order_history_requests,
+                         [{"category": "linear", "orderId": "close-1"}])
+        self.assertIn("position closed: ETHUSDT qty=0.22 entry=2000 exit=1940 pnl=-13.2 "
+                      "why=stop loss", cycle.output)
+        closes = closePushes(cycle)
+        self.assertEqual(len(closes), 1, cycle.pushes)
+        self.assertIn("why: stop loss", closes[0]["message"].splitlines())
+
+    def testALiquidationIsNamedFromTheCloseRecordAlone(self):
+        # Shaped like the manual XRP trade liquidated for -33 USDT on
+        # 2026-09-19; the prices are illustrative. Bybit marks the fill itself
+        # as a bust trade, so no order lookup is needed.
+        record = dict(closedRecord(symbol="XRPUSDT"), qty="170", avgEntryPrice="2.80",
+                      avgExitPrice="2.61", closedPnl="-33", execType="BustTrade")
+        client = FakeBybit(closed=[record])
+
+        cycle = runCycle(client)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.order_history_requests, [])
+        self.assertIn("position closed: XRPUSDT qty=170 entry=2.80 exit=2.61 pnl=-33.0 "
+                      "why=liquidation", cycle.output)
+        closes = closePushes(cycle, "XRPUSDT")
+        self.assertEqual(len(closes), 1, cycle.pushes)
+        self.assertIn("why: liquidation", closes[0]["message"].splitlines())
+
+    def testTheBotsOwnExitIsRecognisedByItsOrderLinkId(self):
+        # The close tag the bot puts on every exit it sends, as on ARB's
+        # cf-ARBUSDT-c-... on the demo account.
+        exit_order = closingOrder(order_link_id="cf-ETHUSDT-c-14912468")
+        client = FakeBybit(closed=[closedRecord()], orders={"close-1": exit_order})
+
+        cycle = runCycle(client)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertIn("pnl=-13.2 why=bot exit", cycle.output)
+        closes = closePushes(cycle)
+        self.assertEqual(len(closes), 1, cycle.pushes)
+        self.assertIn("why: bot exit", closes[0]["message"].splitlines())
+
+    def testAManualCloseIsReportedAsClosedOutsideTheBot(self):
+        # The Close button in Bybit's own interface.
+        manual = closingOrder(create_type="CreateByClosing")
+        client = FakeBybit(closed=[closedRecord()], orders={"close-1": manual})
+
+        cycle = runCycle(client)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertIn("pnl=-13.2 why=closed outside the bot (CreateByClosing)", cycle.output)
+        closes = closePushes(cycle)
+        self.assertEqual(len(closes), 1, cycle.pushes)
+        self.assertIn("why: closed outside the bot (CreateByClosing)",
+                      closes[0]["message"].splitlines())
+
+    def testACloseAlreadyAnnouncedIsNotLookedUpAgain(self):
+        # The close stays inside the lookback window for several cycles; only
+        # the first one that sees it should pay for the order-history request.
+        client = FakeBybit(closed=[closedRecord()], orders={"close-1": stopLossOrder()})
+        first = runCycle(client)
+        self.assertEqual(len(client.order_history_requests), 1, first.output)
+
+        second = runCycle(client, state_dir=first.state_dir)
+
+        self.assertEqual(second.exit_code, 0, second.output)
+        self.assertEqual(len(client.order_history_requests), 1, second.output)
+        self.assertEqual(closePushes(second), [])
+        self.assertNotIn("position closed:", second.output)
+
+    def testAClosingOrderMissingFromTheHistoryIsStillReportedAsUnknown(self):
+        client = FakeBybit(closed=[closedRecord()], orders={})
+
+        cycle = runCycle(client)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertIn("could not look up why ETHUSDT closed", cycle.output)
+        self.assertIn("pnl=-13.2 why=unknown", cycle.output)
+        closes = closePushes(cycle)
+        self.assertEqual(len(closes), 1, cycle.pushes)
+        self.assertIn("why: unknown", closes[0]["message"].splitlines())
+
+    def testAFailedLookupIsReportedAsUnknownAndStillLoggedAndPushed(self):
+        client = FakeBybit(bars=candles(**flat_2000), closed=[closedRecord()],
+                           order_history_error=RuntimeError("order history is down"))
+
+        cycle = runCycle(client, force_entry=True, **risk)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertIn("could not look up why ETHUSDT closed (order close-1): "
+                      "order history is down", cycle.output)
+        self.assertIn("pnl=-13.2 why=unknown", cycle.output)
+        closes = closePushes(cycle)
+        self.assertEqual(len(closes), 1, cycle.pushes)
+        self.assertIn("why: unknown", closes[0]["message"].splitlines())
+        # and the rest of the cycle carries on
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
 
 
 class ConfigurationWarnings(unittest.TestCase):
