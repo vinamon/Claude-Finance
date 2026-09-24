@@ -120,7 +120,8 @@ W skrócie: `DUMMY_MODE`, `AUTOSTART`, `LOOP_INTERVAL_MINUTES`, `SYMBOLS`,
 `BREAKOUT_LOOKBACK`, `BREAKOUT_EXIT_LOOKBACK`, `RISK_MODEL`, `ATR_PERIOD`,
 `ATR_STOP_MULT`, `ATR_TARGET_MULT`, `ATR_TRAIL_MULT`,
 `ATR_TRAIL_ACTIVATION_MULT`, `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`,
-`TRAILING_STOP_PCT`, `TRAILING_ACTIVATION_PCT`, `CLOSED_LOOKBACK_MINUTES`.
+`TRAILING_STOP_PCT`, `TRAILING_ACTIVATION_PCT`, `CLOSED_LOOKBACK_MINUTES`,
+`REENTRY_COOLDOWN_BARS`.
 
 `SYMBOLS` jest listą po przecinku, w formacie ccxt:
 `BTC/USDT:USDT,ETH/USDT:USDT`
@@ -453,6 +454,46 @@ następny cykl zapyta ponownie.
 W logu wejścia widać obie ceny i to, o ile rynek zdążył się ruszyć, np.
 `@~0.147030 live, last close 0.149910 (-1.92%)`.
 
+### Jeden sygnał, jedna transakcja
+
+Sygnał wejścia żyje przez `SIGNAL_LOOKBACK_BARS` świec, bo bot budzi się co
+kilka minut i nie może przegapić przecięcia. Skutek uboczny: pozycja wybita
+stopem w jednym cyklu zostałaby w następnym kupiona **jeszcze raz, na tym
+samym sygnale**. Zasada „jedna pozycja na symbol" tego nie powstrzyma — pilnuje,
+żeby nie było dwóch pozycji naraz, a nie czterech po kolei.
+
+Złapane na tym koncie 2026-09-15: ARB, jeden sygnał trendu, za każdym razem ten
+sam stop 0.14491.
+
+| Wejście | Wypełnienie | Wybite stopem |
+|---|---|---|
+| 20:13:29 | 0.14703 | 20:16:27 |
+| 20:18:24 | 0.14507 | 6 s później |
+| 20:20:23 | 0.14555 | 10 s później |
+| 20:22:25 | 0.14491 | w tej samej sekundzie |
+
+Po czwartym razie Bybit zaczął odrzucać zlecenia.
+
+Dlatego `REENTRY_COOLDOWN_BARS=3`: po **każdym** zamknięciu pozycji na
+symbolu — stop loss, take profit, trailing, wyjście strategii, zamknięcie
+ręczne — nic nie wejdzie w ten symbol przez tyle świec strategii, która chce
+wejść. Na świecach 15-minutowych to 45 minut, dla `trend:1h` trzy godziny.
+Trzy to tyle samo, co `SIGNAL_LOOKBACK_BARS`, więc zanim bot znów może wejść w
+ten symbol, sygnał stojący za poprzednią transakcją wypada z okna: **każdy
+sygnał jest grany raz**. W powtórce ta przerwa dała około 5 punktów w
+spadającej połowie i 35 w rosnącej. `0` ją wyłącza.
+
+- Czasy zamknięć bot bierze **z historii Bybita**, a nie z pliku na laptopie,
+  więc restart ani druga kopia bota ich nie skasuje. Te same dane zasilają
+  powiadomienia o zamknięciach. Okno odczytu samo się wydłuża, gdy przerwa
+  sięga dalej wstecz niż `CLOSED_LOOKBACK_MINUTES`, a linia
+  `closed-position check` w logu podaje okno faktycznie odczytane.
+- Wstrzymane wejście widać w logu jako `re-entry cooldown, N minute(s) left`,
+  a zaraz za tym sam sygnał — da się później ocenić, czego chciała strategia.
+- Gdy historii nie da się odczytać, bot zapisuje w logu
+  `re-entry cooldown unavailable this cycle` i przez ten jeden cykl handluje
+  bez przerwy. Jedno nieudane zapytanie nie jest warte zatrzymania bota.
+
 ### Skąd się wzięła lista dziesięciu symboli
 
 Dziesięć kontraktów krypto o największym obrocie 24h, odczytanych wprost z
@@ -507,8 +548,8 @@ dokłada jedną zmianę do wiersza wyżej:
 Wybrany zestaw dał około 25 transakcji dziennie, 46% trafionych, pozycja
 trwała średnio około trzech godzin, a średni wynik to +0,07% na transakcję po
 prowizjach. Przerwa przed ponownym wejściem jest częścią tego zestawu i ma
-własne ustawienie, `REENTRY_COOLDOWN_BARS`; dopóki nie ma go w kodzie, bot
-wchodzi ponownie szybciej niż w powtórce. Każdą zmianę zostawiono tylko dlatego, że
+własne ustawienie, `REENTRY_COOLDOWN_BARS=3` (patrz *Jeden sygnał, jedna
+transakcja*). Każdą zmianę zostawiono tylko dlatego, że
 pomogła w **obu** połowach, a nie tylko w sumie. Bot gra wyłącznie na wzrosty:
 na spadającym rynku nadal traci i żaden parametr tego nie zmienia. Powtórka
 nie modelowała trailingu, poślizgu ani odrzucania transakcji, których

@@ -305,6 +305,52 @@ The entry log line prints both prices and the move between them,
 the capped stop is exactly the 0.14491 ARB was sent with; measured from
 0.14703 it is 0.14212.
 
+## One signal, one trade
+
+**A signal stays live for `SIGNAL_LOOKBACK_BARS` candles, so without a
+cooldown a failed trade is bought again on the next cycle.** Entries are
+events inside a window (see "Entries are events, exits are states"), and one
+position per symbol stops two positions at once, not four in a row. Measured
+on ARB on 2026-09-15, one trend signal (`-t-`), the same stop 0.14491 each
+time:
+
+| Entry | Fill | Stopped out |
+|---|---|---|
+| 20:13:29 | 0.14703 | 20:16:27 |
+| 20:18:24 | 0.14507 | 6 s later |
+| 20:20:23 | 0.14555 | 10 s later |
+| 20:22:25 | 0.14491 | same second |
+
+After the fourth, Bybit rejected the orders outright.
+
+`REENTRY_COOLDOWN_BARS=3` keeps a symbol out for that many candles after any
+close on it, whatever closed it: stop, target, trail, the bot's own exit, a
+manual close. Three matches `SIGNAL_LOOKBACK_BARS`, so by the time the symbol
+may enter again the signal behind the last trade has left the window. In the
+replay it was worth about 5 points in the falling half and 35 in the rising
+one (see "Parameter choices").
+
+- **Candles of the strategy that wants in.** The wait is counted on the
+  entering strategy's own timeframe: 45 minutes for a 15m rule, three hours
+  for `trend:1h`.
+- **Bybit's close history, never a local file.** Each cycle reads
+  `/v5/position/closed-pnl` once, takes the newest `updatedTime` per market id
+  (`ETHUSDT`, mapped from the ccxt symbol), and the same rows feed the close
+  report. A restart or a second copy of the bot cannot lose a close.
+- **The read window follows the cooldown.** It is the larger of
+  `CLOSED_LOOKBACK_MINUTES` and the cooldown on the slowest active timeframe,
+  and the `closed-position check` log line states that window, not the
+  setting. Given only `startTime`, one request covers at most seven days
+  (Bybit v5 docs), so a cooldown longer than a week would read the oldest week
+  and miss the newest closes. Nothing guards against that yet.
+- **Checked after the signal and the position caps.** A held-back entry logs
+  `re-entry cooldown, N minute(s) left` followed by the signal itself, so the
+  strategy can still be judged.
+- **An unreadable history trades without it for one cycle**, logged as
+  `re-entry cooldown unavailable this cycle`. One failed request is not worth
+  stopping the bot for; the cost is one cycle in which a symbol that just
+  closed can be bought again.
+
 ## Four strategies on one clock
 
 The owner asked for a fast bot: many entries a day on 15-minute candles, not a
@@ -409,8 +455,7 @@ to the row above:
 The chosen set made about 25 trades a day, won 46% of them, held a position
 about three hours on average, and averaged +0.07% per trade after fees. The
 re-entry cooldown is part of it and is its own setting,
-`REENTRY_COOLDOWN_BARS`; until that is in the code the bot re-enters sooner
-than the replay did. Each change was kept only because it helped in BOTH
+`REENTRY_COOLDOWN_BARS=3` (see "One signal, one trade"). Each change was kept only because it helped in BOTH
 halves, not merely overall. Dropping `scalp` helped one half and hurt the
 other, so it stays. The bot is long-only: in a falling market it still loses,
 and no parameter here changes that. The replay did not model the trailing

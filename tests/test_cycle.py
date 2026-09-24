@@ -11,6 +11,7 @@ Run from the repository root, with the project virtualenv active:
     python -m unittest discover -s tests
 """
 
+import time
 import unittest
 
 from fake_bybit import FakeBybit, candles, runCycle
@@ -296,6 +297,103 @@ class CloseCause(unittest.TestCase):
         self.assertIn("why: unknown", closes[0]["message"].splitlines())
         # and the rest of the cycle carries on
         self.assertEqual(len(client.created_orders), 1, cycle.output)
+
+
+def closedMinutesAgo(minutes, symbol="ETHUSDT"):
+    """A closed-position record whose close happened `minutes` ago."""
+    closed_at = int((time.time() - minutes * 60) * 1000)
+    return dict(closedRecord(order_id="close-%s-%d" % (symbol, minutes), symbol=symbol),
+                updatedTime=str(closed_at))
+
+
+def lineContaining(output, text):
+    return next((line for line in output.splitlines() if text in line), "")
+
+
+# Three 15-minute candles: 45 minutes of waiting after any close.
+cooldown = dict(reentry_cooldown_bars=3, entry_timeframe="15m")
+
+
+class ReentryCooldown(unittest.TestCase):
+    def testAPositionClosedTenMinutesAgoHoldsBackTheNextEntry(self):
+        client = FakeBybit(bars=candles(**flat_2000), closed=[closedMinutesAgo(10)])
+
+        cycle = runCycle(client, force_entry=True, **cooldown, **risk)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        skipped = lineContaining(cycle.output, "re-entry cooldown")
+        self.assertIn("ETH/USDT:USDT: no entry", skipped, cycle.output)
+        # 45 minutes of cooldown, 10 of them already gone
+        self.assertIn("35 minute(s) left", skipped)
+        # The signal it held back is still on record.
+        self.assertIn("forcing a test entry", skipped)
+
+    def testACloseOlderThanTheCooldownDoesNotHoldBackTheEntry(self):
+        client = FakeBybit(bars=candles(**flat_2000), closed=[closedMinutesAgo(50)])
+
+        cycle = runCycle(client, force_entry=True, **cooldown, **risk)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        self.assertNotIn("re-entry cooldown", cycle.output)
+
+    def testTheWaitIsCountedInCandlesOfTheStrategyThatWantsToEnter(self):
+        # The same close 50 minutes ago that a 15-minute strategy is past is
+        # still inside three hourly candles.
+        client = FakeBybit(bars=candles(**flat_2000), closed=[closedMinutesAgo(50)])
+
+        cycle = runCycle(client, force_entry=True, active_strategies=["trend"],
+                         strategy_timeframes={"trend": "1h"}, **cooldown, **risk)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("130 minute(s) left", lineContaining(cycle.output, "re-entry cooldown"))
+
+    def testTheCloseHistoryIsReadAsFarBackAsTheLongestCooldown(self):
+        # 3 hourly candles reach further back than CLOSED_LOOKBACK_MINUTES.
+        cycle = runCycle(FakeBybit(), active_strategies=["trend"],
+                         strategy_timeframes={"trend": "1h"}, closed_lookback_minutes=15,
+                         **cooldown)
+
+        self.assertIn("closed-position check: 0 record(s) in the last 180 minute(s)",
+                      cycle.output)
+
+    def testACloseOnOneSymbolDoesNotHoldBackAnother(self):
+        client = FakeBybit(symbols=("ETH/USDT:USDT", "BTC/USDT:USDT"),
+                           bars=candles(**flat_2000), closed=[closedMinutesAgo(10, "ETHUSDT")])
+
+        cycle = runCycle(client, force_entry=True, **cooldown, **risk)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual([order["symbol"] for order in client.created_orders],
+                         ["BTC/USDT:USDT"], cycle.output)
+
+    def testZeroBarsSwitchesTheCooldownOff(self):
+        client = FakeBybit(bars=candles(**flat_2000), closed=[closedMinutesAgo(1)])
+
+        cycle = runCycle(client, force_entry=True, reentry_cooldown_bars=0, **risk)
+
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+
+    def testAnUnreadableCloseHistoryTradesWithoutTheCooldownForOneCycle(self):
+        client = FakeBybit(bars=candles(**flat_2000),
+                           closed_error=RuntimeError("closed-pnl is down"))
+
+        cycle = runCycle(client, force_entry=True, **cooldown, **risk)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        self.assertIn("re-entry cooldown unavailable this cycle", cycle.output)
+
+    def testANegativeCooldownIsRefused(self):
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, force_entry=True, reentry_cooldown_bars=-1, **risk)
+
+        self.assertEqual(cycle.exit_code, 1, cycle.output)
+        self.assertIn("CONFIG ERROR: REENTRY_COOLDOWN_BARS must be >= 0", cycle.output)
+        self.assertEqual(client.created_orders, [])
 
 
 class ConfigurationWarnings(unittest.TestCase):

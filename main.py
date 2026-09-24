@@ -8,7 +8,8 @@ Shape of a run:
      running)
   3. read what is actually held, in ONE request, before deciding anything
   4. for each symbol holding a position: check the owning strategy exit rule
-  5. for each symbol holding nothing: collect every active strategy vote
+  5. for each symbol holding nothing: collect every active strategy vote,
+     then check the position caps and the re-entry cooldown
   6. log every decision and why, then exit 0, or exit 1 on a real failure
 
 Exiting non-zero matters: a red run is the cheapest monitoring you will get.
@@ -43,10 +44,13 @@ signals scan a window of bars rather than only the newest one.
 """
 
 import json
+import math
 import os
 import sys
 import time
 import traceback
+
+import ccxt
 
 import config
 import executor
@@ -124,14 +128,16 @@ def saveOwners(owners):
 # ---------------------------------------------------------------------------
 
 
-def fetchClosedPositions(client):
-    """Bybit's recent closed-position records, or None if the read failed.
+def fetchClosedPositions(client, minutes):
+    """Bybit's closed-position records from the last `minutes`, or None if
+    the read failed.
 
-    Kept apart from the report so the rows are read once per cycle. A failed
-    read is logged here and is never fatal - reporting a close is worth less
-    than running the cycle.
+    Kept apart from the report so the rows are read once per cycle: the same
+    rows feed the report and the re-entry cooldown. A failed read is logged
+    here and is never fatal - reporting a close is worth less than running the
+    cycle.
     """
-    start_time = int(time.time() * 1000) - config.closed_lookback_minutes * 60 * 1000
+    start_time = int(time.time() * 1000) - minutes * 60 * 1000
     try:
         response = client.privateGetV5PositionClosedPnl(
             {
@@ -146,10 +152,14 @@ def fetchClosedPositions(client):
     return ((response or {}).get("result") or {}).get("list") or []
 
 
-def reportClosedPositions(client, rows, notified):
-    """Announce positions Bybit closed on its own since we last looked."""
+def reportClosedPositions(client, rows, notified, minutes):
+    """Announce positions Bybit closed on its own since we last looked.
+
+    `minutes` is the window the rows were actually read over, which the
+    cooldown can make longer than CLOSED_LOOKBACK_MINUTES.
+    """
     log("closed-position check: %d record(s) in the last %d minute(s)"
-        % (len(rows), config.closed_lookback_minutes))
+        % (len(rows), minutes))
 
     for row in rows:
         key = row.get("orderId") or "%s-%s" % (row.get("symbol"), row.get("updatedTime"))
@@ -237,6 +247,76 @@ def toFloat(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# re-entry cooldown: one signal, one trade
+#
+# An entry signal stays valid for SIGNAL_LOOKBACK_BARS candles, so a position
+# stopped out on the first cycle would simply be bought again on the next, on
+# the same signal. After any close on a symbol, nothing enters it again for
+# REENTRY_COOLDOWN_BARS candles of the strategy that wants in.
+#
+# The close times are Bybit's own closed-position records, read once per
+# cycle alongside the report. Nothing is stored locally, so a restart or a
+# second copy of the bot cannot forget a close.
+# ---------------------------------------------------------------------------
+
+
+def cooldownSeconds(timeframe):
+    """How long a symbol stays out after a close, on this timeframe."""
+    return config.reentry_cooldown_bars * ccxt.Exchange.parse_timeframe(timeframe)
+
+
+def closedLookbackMinutes():
+    """How far back this cycle reads the close history.
+
+    CLOSED_LOOKBACK_MINUTES, or longer when the cooldown of the slowest active
+    strategy reaches further back: a close the read never saw cannot hold
+    anything back.
+    """
+    longest = max(cooldownSeconds(timeframe) for timeframe in signals.requiredTimeframes())
+    return max(config.closed_lookback_minutes, math.ceil(longest / 60.0))
+
+
+def lastCloses(rows):
+    """Exchange market id (ETHUSDT) -> time of its newest close, in ms."""
+    newest = {}
+    for row in rows:
+        market_id = row.get("symbol")
+        try:
+            closed_at = int(row.get("updatedTime"))
+        except (TypeError, ValueError):
+            continue
+        if market_id and closed_at > newest.get(market_id, 0):
+            newest[market_id] = closed_at
+    return newest
+
+
+def coolingDown(client, symbol, strategy, last_closes):
+    """(waiting, reason) for one strategy wanting to enter one symbol.
+
+    Measured in candles of the timeframe of the strategy that wants in, so the
+    wait scales with how fast that strategy trades. A close of any cause
+    counts - stop, target, the bot's own exit, a manual close.
+    """
+    if not config.reentry_cooldown_bars or not last_closes:
+        return False, ""
+    closed_at = last_closes.get(client.market(symbol)["id"])
+    if closed_at is None:
+        return False, ""
+
+    timeframe = signals.strategyTimeframe(strategy)
+    wait = cooldownSeconds(timeframe)
+    # A laptop clock a little behind Bybit's puts a fresh close in the future.
+    elapsed = max(0.0, time.time() - closed_at / 1000.0)
+    if elapsed >= wait:
+        return False, ""
+    return True, ("re-entry cooldown, %d minute(s) left: the last position closed %d "
+                  "minute(s) ago and REENTRY_COOLDOWN_BARS=%d on %s's %s candles is %d "
+                  "minute(s)"
+                  % (math.ceil((wait - elapsed) / 60.0), elapsed // 60,
+                     config.reentry_cooldown_bars, strategy, timeframe, wait // 60))
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +417,12 @@ def handleHeld(client, symbol, position, owners):
     return {"held": True, "reason": decision.reason}
 
 
-def handleFlat(client, symbol, owners, open_total, counts):
-    """A symbol we are flat on: collect every active strategy vote."""
+def handleFlat(client, symbol, owners, open_total, counts, last_closes):
+    """A symbol we are flat on: collect every active strategy vote.
+
+    `last_closes` maps a market id to its newest close, or is None when the
+    close history could not be read this cycle.
+    """
     candles = fetchCandles(client, symbol, signals.requiredTimeframes())
     if not any(candles.values()):
         log("%s: no candles returned, skipping" % symbol)
@@ -359,9 +443,19 @@ def handleFlat(client, symbol, owners, open_total, counts):
         log("%s: no entry - %s" % (symbol, reason))
         return {"opened": False, "reason": reason, "capped": True}
 
-    # Price and volatility both come from the timeframe the OWNING strategy
-    # trades. A stop sized from hourly candles would be several times too wide
-    # for a 15-minute scalp and would sit outside the move it is protecting.
+    # The cooldown too, and for the same reason: a signal held back by it is
+    # still a signal the strategy produced.
+    waiting, why = coolingDown(client, symbol, decision.strategy, last_closes)
+    if waiting:
+        reason = "%s, so this signal is skipped: %s" % (why, decision.reason)
+        log("%s: no entry - %s" % (symbol, reason))
+        return {"opened": False, "reason": reason, "cooldown": True}
+
+    # Volatility comes from the timeframe the OWNING strategy trades. A stop
+    # sized from hourly candles would be several times too wide for a 15-minute
+    # scalp and would sit outside the move it is protecting. The last close
+    # goes along only for the log: the executor measures the stop from the
+    # live price.
     timeframe = signals.strategyTimeframe(decision.strategy)
     bars = signals.closedCandles(candles.get(timeframe) or [])
     if not bars:
@@ -435,9 +529,17 @@ def run():
     )
 
     notified = loadNotified()
-    closed_rows = fetchClosedPositions(client)
+    lookback_minutes = closedLookbackMinutes()
+    closed_rows = fetchClosedPositions(client, lookback_minutes)
+    last_closes = None
     if closed_rows is not None:
-        notified = reportClosedPositions(client, closed_rows, notified)
+        notified = reportClosedPositions(client, closed_rows, notified, lookback_minutes)
+        last_closes = lastCloses(closed_rows)
+    elif config.reentry_cooldown_bars:
+        # One failed request must not stop the bot trading. The cost is one
+        # cycle in which a symbol closed a moment ago can be bought again.
+        log("re-entry cooldown unavailable this cycle: the close history could not be "
+            "read, so entries go ahead without it")
     saveNotified(notified)
 
     if not config.symbols:
@@ -474,7 +576,7 @@ def run():
                     open_total -= 1
                     counts = openCounts(held, owners)
             else:
-                result = handleFlat(client, symbol, owners, open_total, counts)
+                result = handleFlat(client, symbol, owners, open_total, counts, last_closes)
                 if result.get("opened"):
                     open_total += 1
                     opener = result.get("strategy")

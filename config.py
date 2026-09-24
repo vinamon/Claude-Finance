@@ -236,6 +236,22 @@ min_entry_votes = envInt("MIN_ENTRY_VOTES", 1)
 # one direction. Symbols are considered in SYMBOLS order. 0 disables the cap.
 max_open_positions = envInt("MAX_OPEN_POSITIONS", 10)
 
+# After a position on a symbol closes - by the strategy, a stop, a target,
+# anything - no new entry on that symbol for this many candles of the
+# strategy's timeframe. 0 disables it.
+#
+# Entries look for a signal within the last SIGNAL_LOOKBACK_BARS candles, so
+# one signal stays valid for several cycles. Without a cooldown a position
+# stopped out on the first cycle is simply bought again on the next, on the
+# same signal. Measured live on ARB: four entries on one trend signal inside
+# nine minutes, the first stopped out after three minutes and the other three
+# within ten seconds of the fill. Matching the lookback window means each
+# signal is traded once.
+#
+# The close times come from Bybit's closed-position records, not a local
+# file, so a restart or a second copy of the bot cannot lose them.
+reentry_cooldown_bars = envInt("REENTRY_COOLDOWN_BARS", 3)
+
 
 # ---------------------------------------------------------------------------
 # position size and leverage
@@ -467,7 +483,9 @@ position_idx = envInt("POSITION_IDX", 0)
 # letters, digits, dashes and underscores.
 order_link_prefix = envStr("ORDER_LINK_PREFIX", "cf")
 
-# How far back to ask Bybit for closed positions when reporting fills.
+# How far back to ask Bybit for closed positions when reporting fills. The
+# read reaches further back on its own when the re-entry cooldown needs it
+# (REENTRY_COOLDOWN_BARS times the slowest active timeframe).
 closed_lookback_minutes = envInt("CLOSED_LOOKBACK_MINUTES", 15)
 
 # Optional file used to remember which closes were already announced, so a
@@ -609,6 +627,8 @@ def validate():
         problems.append("LEVERAGE must be >= 1")
     if max_open_positions < 0:
         problems.append("MAX_OPEN_POSITIONS must be >= 0 (0 means no cap)")
+    if reentry_cooldown_bars < 0:
+        problems.append("REENTRY_COOLDOWN_BARS must be >= 0 (0 disables the cooldown)")
     if loop_interval_minutes < 1:
         problems.append("LOOP_INTERVAL_MINUTES must be >= 1")
     if order_bucket_seconds < 1:

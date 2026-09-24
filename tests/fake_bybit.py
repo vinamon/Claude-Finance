@@ -42,6 +42,9 @@ baseline = {
     "min_entry_votes": 1,
     "max_open_positions": 10,
     "max_open_per_strategy": {},
+    # Off here, on by name in the tests about it, so a close record written
+    # for a test about something else cannot quietly hold back its entry.
+    "reentry_cooldown_bars": 0,
     "dummy_mode": True,
     "force_entry": False,
     "github_event_name": "local",
