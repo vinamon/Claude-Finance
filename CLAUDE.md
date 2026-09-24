@@ -16,6 +16,7 @@ Run it from a laptop, not CI. See "Why not GitHub Actions" below.
 | `notify.py` | ntfy.sh push |
 | `main.py` | one pass: closed-position reports, exits, entries |
 | `run.py` | laptop runner, the loop/once switch |
+| `tests/` | one bot cycle end to end against a fake Bybit (`fake_bybit.py`). Standard `unittest`, no network |
 
 ## Facts verified against Bybit's v5 docs. Do not "fix" these.
 
@@ -353,6 +354,21 @@ at work, 10% of the 50,000 demo balance.
 
 **`LEVERAGE=1`.** Leverage does not change position size, only how close
 liquidation sits.
+
+## Tests
+
+```
+python -m unittest discover -s tests     from the repo root, no network
+```
+
+**Tests go through one door.** Every test runs a whole cycle via
+`main.main()` against `tests/fake_bybit.py` and asserts on what reaches the
+exchange, the log and the phone - never on a helper or a state file.
+`runCycle()` pins every setting that shapes a cycle, because the owner's
+`.env` is already loaded into `config` when a test imports it; a test that
+relies on a particular value passes it explicitly. When a cycle starts asking
+Bybit something new, teach the fake to answer it rather than patching around
+it.
 
 ## Conventions
 

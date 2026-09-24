@@ -3,8 +3,9 @@ Entry point. One pass over every configured symbol, then exit.
 
 Shape of a run:
   1. validate config, build a demo-pinned Bybit client
-  2. report positions Bybit closed recently (SL/TP/trailing/liquidation fills
-     that happened while nothing was running)
+  2. read Bybit's closed-position records once, and report the new ones
+     (SL/TP/trailing/liquidation fills that happened while nothing was
+     running)
   3. read what is actually held, in ONE request, before deciding anything
   4. for each symbol holding a position: check the owning strategy exit rule
   5. for each symbol holding nothing: collect every active strategy vote
@@ -123,11 +124,14 @@ def saveOwners(owners):
 # ---------------------------------------------------------------------------
 
 
-def reportClosedPositions(client, notified):
-    """Announce positions Bybit closed on its own since we last looked."""
-    window_ms = config.closed_lookback_minutes * 60 * 1000
-    start_time = int(time.time() * 1000) - window_ms
+def fetchClosedPositions(client):
+    """Bybit's recent closed-position records, or None if the read failed.
 
+    Kept apart from the report so the rows are read once per cycle. A failed
+    read is logged here and is never fatal - reporting a close is worth less
+    than running the cycle.
+    """
+    start_time = int(time.time() * 1000) - config.closed_lookback_minutes * 60 * 1000
     try:
         response = client.privateGetV5PositionClosedPnl(
             {
@@ -138,9 +142,12 @@ def reportClosedPositions(client, notified):
         )
     except Exception as error:
         log("could not fetch closed positions: %s" % error)
-        return notified
+        return None
+    return ((response or {}).get("result") or {}).get("list") or []
 
-    rows = ((response or {}).get("result") or {}).get("list") or []
+
+def reportClosedPositions(rows, notified):
+    """Announce positions Bybit closed on its own since we last looked."""
     log("closed-position check: %d record(s) in the last %d minute(s)"
         % (len(rows), config.closed_lookback_minutes))
 
@@ -374,7 +381,9 @@ def run():
     )
 
     notified = loadNotified()
-    notified = reportClosedPositions(client, notified)
+    closed_rows = fetchClosedPositions(client)
+    if closed_rows is not None:
+        notified = reportClosedPositions(closed_rows, notified)
     saveNotified(notified)
 
     if not config.symbols:
