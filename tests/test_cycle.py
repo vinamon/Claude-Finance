@@ -170,7 +170,7 @@ class ClosedPositionReport(unittest.TestCase):
         self.assertEqual(cycle.exit_code, 0, cycle.output)
         self.assertEqual(len(client.closed_requests), 1)
         self.assertIn("closed-position check: 1 record(s) in the last 15 minute(s)", cycle.output)
-        self.assertIn("position closed: ETHUSDT qty=0.22 entry=2000 exit=1940 pnl=-13.2",
+        self.assertIn("CLOSED ETHUSDT qty=0.22 entry=2000 exit=1940 pnl=-13.2",
                       cycle.output)
         closes = [push for push in cycle.pushes if push["title"] == "Closed ETHUSDT"]
         self.assertEqual(len(closes), 1)
@@ -216,7 +216,7 @@ class CloseCause(unittest.TestCase):
         self.assertEqual(cycle.exit_code, 0, cycle.output)
         self.assertEqual(client.order_history_requests,
                          [{"category": "linear", "orderId": "close-1"}])
-        self.assertIn("position closed: ETHUSDT qty=0.22 entry=2000 exit=1940 pnl=-13.2 "
+        self.assertIn("CLOSED ETHUSDT qty=0.22 entry=2000 exit=1940 pnl=-13.2 "
                       "why=stop loss", cycle.output)
         closes = closePushes(cycle)
         self.assertEqual(len(closes), 1, cycle.pushes)
@@ -234,7 +234,7 @@ class CloseCause(unittest.TestCase):
 
         self.assertEqual(cycle.exit_code, 0, cycle.output)
         self.assertEqual(client.order_history_requests, [])
-        self.assertIn("position closed: XRPUSDT qty=170 entry=2.80 exit=2.61 pnl=-33.0 "
+        self.assertIn("CLOSED XRPUSDT qty=170 entry=2.80 exit=2.61 pnl=-33.0 "
                       "why=liquidation", cycle.output)
         closes = closePushes(cycle, "XRPUSDT")
         self.assertEqual(len(closes), 1, cycle.pushes)
@@ -287,7 +287,7 @@ class CloseCause(unittest.TestCase):
         self.assertEqual(second.exit_code, 0, second.output)
         self.assertEqual(len(client.order_history_requests), 1, second.output)
         self.assertEqual(closePushes(second), [])
-        self.assertNotIn("position closed:", second.output)
+        self.assertNotIn("CLOSED ", second.output)
 
     def testAClosingOrderMissingFromTheHistoryIsStillReportedAsUnknown(self):
         client = FakeBybit(closed=[closedRecord()], orders={})
@@ -413,6 +413,39 @@ class ReentryCooldown(unittest.TestCase):
         self.assertEqual(cycle.exit_code, 1, cycle.output)
         self.assertIn("CONFIG ERROR: REENTRY_COOLDOWN_BARS must be >= 0", cycle.output)
         self.assertEqual(client.created_orders, [])
+
+
+class ShortLog(unittest.TestCase):
+    """LOG_DETAIL off: only what changed, errors, and one summary line."""
+
+    def testAQuietCycleSaysNoEntriesAndNothingPerSymbol(self):
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, log_detail=False, **risk)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(cycle.output.strip(), "no entries, 0 open")
+
+    def testAnEntryPrintsTheInstrumentSizeAndLeverage(self):
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, log_detail=False, force_entry=True, **risk)
+
+        lines = cycle.output.strip().splitlines()
+        self.assertEqual(len(lines), 2, cycle.output)
+        self.assertIn("OPENED ETH/USDT:USDT long qty=", lines[0])
+        self.assertIn("USDT at 5x", lines[0])
+        self.assertEqual(lines[1].strip(), "1 opened, 1 open")
+
+    def testACloseIsPrintedWithItsCause(self):
+        client = FakeBybit(closed=[closedRecord()], orders={"close-1": stopLossOrder()})
+
+        cycle = runCycle(client, log_detail=False)
+
+        self.assertIn("CLOSED ETHUSDT qty=0.22 entry=2000 exit=1940 pnl=-13.2 why=stop loss",
+                      cycle.output)
+        self.assertIn("1 closed, 0 open", cycle.output)
+        self.assertNotIn("closed-position check", cycle.output)
 
 
 class ConfigurationWarnings(unittest.TestCase):

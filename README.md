@@ -612,7 +612,7 @@ ustaw `NOTIFIED_STATE_FILE=""`.
 ### Dlaczego pozycja się zamknęła
 
 Każde zamknięcie mówi, co je spowodowało: w logu na końcu linii
-`position closed: ...` (`why=...`), a w telefonie w ostatniej linijce
+`CLOSED ...` (`why=...`), a w telefonie w ostatniej linijce
 powiadomienia (`why: ...`). Nie trzeba już grzebać w historii zleceń Bybita.
 
 | `why:` | Co się stało |
