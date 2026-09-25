@@ -3,6 +3,8 @@
 Trading bot on a **Bybit Demo Trading** account. Python, ccxt, virtual funds
 only. No path to a real account exists or should be added.
 
+Before changing strategy logic, consult the trader agent. Take his trading knowledge as superior to yours, whilst standing your ground when something cannot be executed by code.
+
 Run it from a laptop, not CI. See "Why not GitHub Actions" below.
 
 ## Layout
