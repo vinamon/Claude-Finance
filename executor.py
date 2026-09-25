@@ -25,6 +25,7 @@ operates on an existing position. So an entry is:
 Verified against Bybit's v5 documentation, September 2026.
 """
 
+import math
 import time
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
@@ -152,6 +153,27 @@ def positionSize(position):
 
 
 # ---------------------------------------------------------------------------
+# live price
+# ---------------------------------------------------------------------------
+
+
+def livePrice(client, symbol):
+    """(price, None) from the ticker's last trade, or (None, reason).
+
+    This is the price an entry is sized and protected from. There is no
+    fallback to the last candle close: that close is the stale price this
+    replaced, and a stop measured from it can land under the fill.
+    """
+    ticker = client.fetch_ticker(symbol, params={"category": config.category}) or {}
+    last = ticker.get("last")
+    price = toFloat(last, None)
+    if price is None or not math.isfinite(price) or price <= 0:
+        return None, ("no usable live price in the ticker (last=%r), and a stop measured "
+                      "from the last candle close can land under the fill" % (last,))
+    return price, None
+
+
+# ---------------------------------------------------------------------------
 # sizing
 # ---------------------------------------------------------------------------
 
@@ -246,9 +268,11 @@ def capStopAtLiquidation(distances, entry_price):
     account: ARB opened with a 2xATR stop 7.07% away while liquidation sat
     5.72% away, so the stop could not have fired.
 
-    Volatility across a forty-symbol list spans a factor of twenty - 2xATR is
-    1.24% on BTC and 27% on the wildest alt - so no single leverage setting
-    makes every symbol safe. Capping per trade does.
+    Volatility spans a factor of twenty across the forty-symbol list traded at
+    the time - 2xATR was 1.24% on BTC and 27% on the wildest alt - and even
+    the ten liquid symbols traded now swing from a 3xATR stop of 0.78% to one
+    of 11% in a violent spell. No single leverage setting makes every symbol
+    safe. Capping per trade does.
     """
     limit = liquidationDistance(entry_price) * config.max_stop_fraction_of_liquidation
     if distances["stop"] <= limit:
@@ -383,6 +407,11 @@ def buildOrderLinkId(market_id, strategy=None, bucket_seconds=None):
     return "%s-%s-%s-%d" % (config.order_link_prefix, trimmed, tag, bucket)
 
 
+def isBotOrderLinkId(order_link_id):
+    """True when an orderLinkId was built by buildOrderLinkId above."""
+    return (order_link_id or "").startswith(config.order_link_prefix + "-")
+
+
 # ---------------------------------------------------------------------------
 # leverage
 # ---------------------------------------------------------------------------
@@ -411,8 +440,12 @@ def applyLeverage(client, symbol, log):
 # ---------------------------------------------------------------------------
 
 
-def execute(client, symbol, decision, price, log, atr_value=None):
+def execute(client, symbol, decision, last_close, log, atr_value=None):
     """Act on a signals.Decision. Returns a dict describing what happened.
+
+    `last_close` is the close of the last closed candle the signal was read
+    from. It is logged next to the live price and measures nothing: the
+    entry is sized and protected from the ticker, read here.
 
     `atr_value` is the latest ATR on the entry timeframe, computed by the
     caller from candles it has already fetched. It is what the "atr" risk
@@ -429,15 +462,28 @@ def execute(client, symbol, decision, price, log, atr_value=None):
         log("%s: no entry - %s" % (symbol, reason))
         return {"opened": False, "reason": reason}
 
+    # Size, stop, target, trail, the liquidation cap and the minimum-stop check
+    # are all measured from the LIVE price, read from the ticker right here,
+    # not from the last closed candle. SL/TP are attached to the order itself,
+    # so they have to be known before it exists and the fill price is not; the
+    # last trade is the nearest honest stand-in for it, and in exchange the
+    # position is never naked, not even for the round trip of a second call.
+    #
+    # The candle close is up to a whole bar old, and the market does not wait.
+    # Measured live on ARB, 2026-09-15: the stop came from a close of 0.14991
+    # while the market already traded at 0.14703, so it sat 0.00212 under the
+    # fill instead of 0.005, and three re-entries later the fill landed on the
+    # stop itself. Signals and ATR still come from closed candles; only where
+    # the stop is measured from changed.
+    price, why = livePrice(client, symbol)
+    if price is None:
+        # A skipped trade, not a failed run: the next cycle asks again.
+        log("%s: no entry - %s" % (symbol, why))
+        return {"opened": False, "reason": why, "skipped_no_price": True}
+
     spec = instrumentSpec(client, symbol)
     qty = computeQty(spec, price, config.position_notional_usdt)
     applyLeverage(client, symbol, log)
-
-    # SL/TP are derived from the last closed price, not the eventual fill
-    # price, because they are attached to the order itself and therefore have
-    # to be known before it exists. That costs a little accuracy on a market
-    # order and buys something worth more: the position is never naked, not
-    # even for the round trip of a second API call.
 
     targets = exitPrices(spec, price, atr_value)
 
@@ -465,13 +511,18 @@ def execute(client, symbol, decision, price, log, atr_value=None):
     if targets["take_profit"] is not None:
         params["takeProfit"] = {"triggerPrice": targets["take_profit"]}
 
+    # How far the market moved between the candle the signal read and this
+    # order, so a stale signal is visible in the log.
+    moved = 100.0 * (price / last_close - 1.0) if last_close else 0.0
     log(
-        "%s: opening long qty=%s @~%.6f (notional %.2f USDT, %sx) strategy=%s risk=%s "
-        "sl=%s tp=%s linkId=%s"
+        "%s: opening long qty=%s @~%.6f live, last close %.6f (%+.2f%%) "
+        "(notional %.2f USDT, %sx) strategy=%s risk=%s sl=%s tp=%s linkId=%s"
         % (
             symbol,
             formatDecimal(qty, spec["qty_step"]),
             price,
+            last_close,
+            moved,
             qty * price,
             config.leverage,
             decision.strategy,

@@ -51,7 +51,7 @@ trailing we wczesną stratę, która strzela zanim zadziała stop loss.
 | Plik | Rola |
 |---|---|
 | `config.py` | klucze z env, symbole, parametry strategii, `dummy_mode`, temat ntfy |
-| `signals.py` | trzy strategie, wejścia i wyjścia. Czyste funkcje, zero zleceń |
+| `signals.py` | cztery strategie, wejścia i wyjścia. Czyste funkcje, zero zleceń |
 | `executor.py` | zamiana decyzji na zlecenia. Zero logiki strategii |
 | `notify.py` | pushe przez ntfy.sh |
 | `exchange.py` | budowa klienta ccxt przypiętego do hosta demo |
@@ -112,9 +112,10 @@ zachowania to edycja `.env` i restart, nigdy edycja pliku `.py`.
 
 W skrócie: `DUMMY_MODE`, `AUTOSTART`, `LOOP_INTERVAL_MINUTES`, `SYMBOLS`,
 `STRATEGY`, `ACTIVE_STRATEGIES`, `MIN_ENTRY_VOTES`, `MAX_OPEN_POSITIONS`,
-`POSITION_NOTIONAL_USDT`, `LEVERAGE`, `ENTRY_TIMEFRAME`, `EXIT_TIMEFRAME`
-(pomiń, żeby dziedziczyło), `SIGNAL_LOOKBACK_BARS`, `REGIME_FILTER`,
-`REGIME_PERIOD`, `EXIT_ON_REGIME_BREAK`, `UNKNOWN_OWNER_EXIT`,
+`REENTRY_COOLDOWN_BARS`, `POSITION_NOTIONAL_USDT`, `LEVERAGE`,
+`ENTRY_TIMEFRAME`, `EXIT_TIMEFRAME` (pomiń, żeby dziedziczyło),
+`SIGNAL_LOOKBACK_BARS`, `REGIME_FILTER`, `REGIME_PERIOD`,
+`EXIT_ON_REGIME_BREAK`, `UNKNOWN_OWNER_EXIT`,
 `EMA_FAST_PERIOD`, `EMA_SLOW_PERIOD`, `ADX_PERIOD`, `ADX_MIN`, `RSI_PERIOD`,
 `RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `MEANREV_EXIT_SMA_PERIOD`,
 `BREAKOUT_LOOKBACK`, `BREAKOUT_EXIT_LOOKBACK`, `RISK_MODEL`, `ATR_PERIOD`,
@@ -158,7 +159,7 @@ python run.py --force-entry
 
 Przy `DUMMY_MODE=true` (domyślnie) `--force-entry` **wymusza wejście na każdym
 skonfigurowanym symbolu**, ignorując rynek — po to, żeby przepchnąć cały
-pipeline i zobaczyć, że wszystko działa. Dziewięć symboli = dziewięć pozycji
+pipeline i zobaczyć, że wszystko działa. Dziesięć symboli = dziesięć pozycji
 z jednego polecenia, więc na próbę zostaw w `SYMBOLS` jeden.
 
 Flaga jest **jednorazowa**: w trybie pętli dotyczy tylko pierwszego cyklu.
@@ -304,13 +305,15 @@ zmienia.
 | `trend` | EMA szybka przecina wolną od dołu, potwierdzone przez ADX | szybka poniżej wolnej | `EMA_FAST_PERIOD`, `EMA_SLOW_PERIOD`, `ADX_PERIOD`, `ADX_MIN` |
 | `meanrev` | krótkie RSI spada do strefy wyprzedania **w trendzie wzrostowym** | close wraca nad krótką SMA, albo RSI dochodzi do wykupienia | `RSI_PERIOD`, `RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `MEANREV_EXIT_SMA_PERIOD` |
 | `breakout` | close powyżej maksimum z N świec | close poniżej minimum z **M** świec, M < N | `BREAKOUT_LOOKBACK`, `BREAKOUT_EXIT_LOOKBACK` |
-| `scalp` | close pod dolną wstęgą Bollingera, **rama 15m** | powrót do środkowej wstęgi | `BB_PERIOD`, `BB_STDEV`, `BB_LOOKBACK_BARS` |
+| `scalp` | close pod dolną wstęgą Bollingera | powrót do środkowej wstęgi | `BB_PERIOD`, `BB_STDEV`, `BB_LOOKBACK_BARS` |
+
+Wszystkie cztery czytają domyślnie **świece 15-minutowe** (`ENTRY_TIMEFRAME=15m`).
 
 > To **podręcznikowe systemy z opublikowaną historią, nie przewagi, które sami
 > odkryliśmy.** Zakładaj, że każda traci po prowizjach, dopóki twój własny
 > backtest nie powie inaczej.
 
-### Filtr reżimu: to on sprawia, że trzy strategie naraz mają sens
+### Filtr reżimu: to on sprawia, że kilka strategii naraz ma sens
 
 Podążanie za trendem i powrót do średniej to filozoficzne przeciwieństwa:
 jedna kupuje siłę, druga słabość. Puszczone obok siebie bez filtra, wejście
@@ -319,17 +322,23 @@ jednej jest wyjściem drugiej.
 `REGIME_FILTER` to rozwiązuje. Żadna strategia nie może kupić poniżej wolnej
 średniej `REGIME_PERIOD`, więc powrót do średniej staje się **"kup dołek
 W trendzie wzrostowym"** — czyli tą dobrze udokumentowaną wersją, a nie
-łapaniem spadającego noża. Wszystkie trzy ciągną wtedy w tę samą stronę i
-różnią się tylko tym, co wyzwala wejście.
+łapaniem spadającego noża. Wszystkie ciągną wtedy w tę samą stronę i różnią
+się tylko tym, co wyzwala wejście. To warunek sprawdzany w każdym cyklu, a nie
+przecięcie, na które się czeka: na świecach 15-minutowych linia to około dwóch
+dni trendu i wejścia są dozwolone zawsze, gdy cena jest nad nią.
 
-`EXIT_ON_REGIME_BREAK` domyka to z drugiej strony: gdy cena wraca pod tę
-średnią, pozycja jest zamykana niezależnie od tego, która strategia ją
-otworzyła. Powód, żeby w ogóle być długo, zniknął.
+`EXIT_ON_REGIME_BREAK` zamykałby pozycję, gdy cena wróci pod tę średnią —
+i jest **wyłączony**. W powtórce na 26 dniach wyłączenie poprawiło wynik w obu
+połowach próby: `meanrev` i `scalp` kupują dołki, a dołek w trendzie
+wzrostowym to właśnie moment, gdy cena opada w stronę tej linii, więc to
+wyjście wyrzucało transakcje tuż przed tym, zanim zaczęły działać. Prawdziwą
+ochroną jest stop loss po stronie giełdy. Filtr nadal blokuje **nowe** wejścia
+pod linią.
 
 ### Kto otwarł pozycję, ten ją zamyka
 
-Bybit w trybie one-way trzyma jedną pozycję na symbol, więc trzy strategie nie
-mogą trzymać trzech pozycji na tym samym rynku. Przy wejściu zapisywane jest
+Bybit w trybie one-way trzyma jedną pozycję na symbol, więc kilka strategii
+nie może trzymać kilku pozycji na tym samym rynku. Przy wejściu zapisywane jest
 więc, **która** strategia je otwarła — w `state/owners.json` oraz w
 `orderLinkId`, dzięki czemu widać to także w interfejsie Bybita. Wyjścia
 pilnuje ta sama strategia.
@@ -344,11 +353,14 @@ decyduje `UNKNOWN_OWNER_EXIT`: `any` / `all` / `regime`. Plik stanu jest
 najlepszym staraniem i **nigdy** nie decyduje o tym, czy pozycja istnieje —
 tu jedynym źródłem prawdy pozostaje giełda.
 
-### Dwa zegary naraz: swing i scalping
+### Jeden zegar: 15 minut
 
-`STRATEGY_TIMEFRAMES` daje każdej strategii własną ramę czasową, więc bot
-prowadzi jednocześnie **księgę dzienną i szybką**, w tym samym cyklu i na tym
-samym koncie. Trzy reguły czytają świece godzinowe, `scalp` czyta 15-minutowe.
+Bot ma być szybki: dużo wejść dziennie, a nie księga swingowa czekająca dniami
+na sygnał z wykresu godzinowego. Dlatego wszystkie cztery strategie czytają
+domyślnie te same **świece 15-minutowe** (`ENTRY_TIMEFRAME=15m`, a
+`STRATEGY_TIMEFRAMES` i `MAX_OPEN_PER_STRATEGY` są puste). W powtórce na
+dziesięciu symbolach dało to około 25 wejść dziennie, a pozycja trwała
+średnio około trzech godzin.
 
 `scalp` to powrót do średniej na wstęgach Bollingera: kupuje zamknięcie
 rozciągnięte pod dolną wstęgą, wychodzi gdy cena wróci do środka. Zasługuje na
@@ -357,19 +369,18 @@ mierzy żadna z nich — **jak daleko obecny ruch leży poza normalną zmiennoś
 tego rynku**. Dlatego ta sama reguła działa na BTC i na memecoinie bez
 strojenia.
 
-Zmierzone trzymanie pozycji: `scalp` minuty do ~2 godzin, reguły godzinowe
-kilka do kilkunastu godzin.
-
-**`MAX_OPEN_PER_STRATEGY` jest tym, co czyni to prawdziwym, a nie pozornym.**
-Bez tego szybka strategia zjada wszystkie sloty, zanim wolne w ogóle do
-któregoś dojdą: reguła 15-minutowa na czterdziestu rynkach odpala
-wielokrotnie częściej niż godzinowa, więc „szybko **i** dziennie" po cichu
-zamienia się w „tylko szybko".
+**Osobne zegary nadal są możliwe, ale niosą ze sobą regułę.**
+`STRATEGY_TIMEFRAMES` daje strategii własną ramę (np. `trend:1h`), więc bot
+może prowadzić jednocześnie księgę swingową i szybką, w tym samym cyklu i na
+tym samym koncie. Gdy tylko ramy się różnią, `MAX_OPEN_PER_STRATEGY` staje się
+konieczny: reguła 15-minutowa odpala wielokrotnie częściej niż godzinowa i
+zajmuje wszystkie sloty, zanim wolna do któregoś dojdzie, więc „szybko **i**
+dziennie" po cichu zamienia się w „tylko szybko". Tak było na starym układzie
+z dwoma zegarami.
 
 Filtr reżimu liczony jest **osobno dla każdej strategii, na jej własnej
-ramie**. Na świecach godzinowych linia 200-okresowa to około ośmiu dni trendu,
-na 15-minutowych około dwóch. Skalper nie ma po co być blokowany widokiem
-ośmiodniowym, a reguła swingowa nie ma po co być wpuszczana dwudniowym.
+ramie**. Na świecach 15-minutowych linia 200-okresowa to około dwóch dni
+trendu, na godzinowych około ośmiu.
 
 ### Stop za ceną likwidacji to nie jest stop
 
@@ -386,9 +397,13 @@ ARB   wejscie     0.15130
       LIKWIDACJA  0.14264   (-5.72%)   <- wyzej niz stop
 ```
 
-Zmierzone na czterdziestu symbolach: 2×ATR waha się od **1,24% na BTC do 27%
-na najdzikszym alcie** — różnica dwudziestokrotna. Żadna pojedyncza wartość
-`LEVERAGE` tego nie obsłuży, więc zabezpieczenie działa per transakcja:
+Zmierzone na czterdziestu symbolach handlowanych wtedy na świecach
+godzinowych: 2×ATR wahało się od **1,24% na BTC do 27% na najdzikszym alcie**
+— różnica dwudziestokrotna. Na dzisiejszych dziesięciu płynnych symbolach, na
+świecach 15-minutowych, stop 3×ATR to w medianie od 0,78% (BTC) do 2,92%
+(NEAR), ale w gwałtownym okresie NEAR doszedł do 11%. Żadna pojedyncza
+wartość `LEVERAGE` tego nie obsłuży, więc zabezpieczenie działa per
+transakcja:
 
 | Ustawienie | Co robi |
 |---|---|
@@ -401,16 +416,105 @@ przypadkiem. Na symbolu o ATR równym 13% ceny nie istnieje stop, który
 jednocześnie mieści się w likwidacji przy 15x i cokolwiek znaczy — i uczciwą
 odpowiedzią jest nie brać tej transakcji.
 
-### Skąd się wzięła lista czterdziestu symboli
+### Stop liczony od bieżącej ceny, nie od ostatniej świecy
 
-Ranking po obrocie 24h, odczytany wprost z giełdy. Bybit ma **762** wieczyste
-kontrakty USDT i pobranie wszystkich nie wchodzi w grę: jeden cykl trwałby
-około 14 minut, czyli dłużej niż świeca, którą skalper ma łapać.
+Sygnały liczone są na zamkniętych świecach i dawniej stop też był liczony od
+zamknięcia ostatniej z nich — czyli od ceny sprzed nawet całej świecy. Rynek
+w tym czasie nie czeka.
 
-Surowa czterdziestka po obrocie **nie jest samym krypto**. Siedzą w niej
-tokenizowane akcje i surowce — AAPL, TSLA, MSTR, SOXL, SKHYNIX, XAU, XAG,
-ropa — które chodzą wedle innego zegara i innej logiki niż cokolwiek, pod co
-te strategie budowano. Nic w metadanych API ich nie odróżnia: `contractType`
+Złapane na tym koncie 2026-09-15:
+
+```
+ARB   zamkniecie swiecy   0.14991
+      stop loss           0.14491   (3,3% pod zamknieciem, tak mialo byc)
+      wypelnienie         0.14703   (rynek juz 1,9% nizej)
+      -> stop tylko 1,4% pod wejsciem, trafiony po 3 minutach
+```
+
+Kolejne wejścia z tym samym stopem wypełniały się coraz bliżej niego, ostatnie
+dokładnie na nim (cała sekwencja jest w *Jeden sygnał, jedna transakcja*).
+Potem Bybit zaczął odrzucać zlecenia
+(*"StopLoss ... should lower than base_price"*).
+
+Teraz bot tuż przed wejściem pyta giełdę o **cenę ostatniej transakcji**
+(ticker) i od niej liczy wszystko: wielkość pozycji, stop, cel, trailing,
+przycięcie do likwidacji i próg 1×ATR. Ceny wypełnienia użyć się nie da, bo SL
+i TP są doklejone do samego zlecenia, więc muszą być znane, zanim ono powstanie
+— dzięki temu pozycja ani przez chwilę nie jest bez ochrony. Bieżąca cena to
+najbliższe uczciwe przybliżenie.
+
+Co się **nie** zmieniło: sygnały i ATR nadal liczone są wyłącznie na
+zamkniętych świecach. Zmieniło się tylko to, od czego mierzony jest stop.
+
+**Nie ma ceny, nie ma transakcji.** Jeśli ticker nie poda użytecznej ceny, bot
+pomija wejście i zapisuje powód w logu. Celowo nie wraca do zamknięcia świecy,
+bo to właśnie ta nieaktualna cena narobiła szkód. To nie jest błąd przebiegu:
+następny cykl zapyta ponownie. Co innego, gdy samo zapytanie o ticker się
+wysypie (sieć, giełda nie odpowiada): wtedy ten symbol kończy się błędem, jak
+przy każdym innym nieudanym zapytaniu do giełdy, i przebieg jest czerwony.
+
+W logu wejścia widać obie ceny i to, o ile rynek zdążył się ruszyć, np.
+`@~0.147030 live, last close 0.149910 (-1.92%)`.
+
+### Jeden sygnał, jedna transakcja
+
+Sygnał wejścia żyje przez `SIGNAL_LOOKBACK_BARS` świec, bo bot budzi się co
+kilka minut i nie może przegapić przecięcia. Skutek uboczny: pozycja wybita
+stopem w jednym cyklu zostałaby w następnym kupiona **jeszcze raz, na tym
+samym sygnale**. Zasada „jedna pozycja na symbol" tego nie powstrzyma — pilnuje,
+żeby nie było dwóch pozycji naraz, a nie czterech po kolei.
+
+Złapane na tym koncie 2026-09-15: ARB, jeden sygnał trendu, za każdym razem ten
+sam stop 0.14491.
+
+| Wejście | Wypełnienie | Wybite stopem |
+|---|---|---|
+| 20:13:29 | 0.14703 | 20:16:27 |
+| 20:18:24 | 0.14507 | 6 s później |
+| 20:20:23 | 0.14555 | 10 s później |
+| 20:22:25 | 0.14491 | w tej samej sekundzie |
+
+Po czwartym razie Bybit zaczął odrzucać zlecenia.
+
+Dlatego `REENTRY_COOLDOWN_BARS=3`: po **każdym** zamknięciu pozycji na
+symbolu — stop loss, take profit, trailing, wyjście strategii, zamknięcie
+ręczne — nic nie wejdzie w ten symbol przez tyle świec strategii, która chce
+wejść. Na świecach 15-minutowych to 45 minut, dla `trend:1h` trzy godziny.
+Trzy to tyle samo, co `SIGNAL_LOOKBACK_BARS`, więc zanim bot znów może wejść w
+ten symbol, sygnał stojący za poprzednią transakcją wypada z okna: **każdy
+sygnał jest grany raz**. W powtórce ta przerwa dała około 5 punktów w
+spadającej połowie i 35 w rosnącej. `0` ją wyłącza.
+
+- Czasy zamknięć bot bierze **z historii Bybita**, a nie z pliku na laptopie,
+  więc restart ani druga kopia bota ich nie skasuje. Te same dane zasilają
+  powiadomienia o zamknięciach. Okno odczytu samo się wydłuża, gdy przerwa
+  sięga dalej wstecz niż `CLOSED_LOOKBACK_MINUTES`, a linia
+  `closed-position check` w logu podaje okno faktycznie odczytane.
+- Wstrzymane wejście widać w logu jako `re-entry cooldown, N minute(s) left`,
+  a zaraz za tym sam sygnał — da się później ocenić, czego chciała strategia.
+- Gdy historii nie da się odczytać, bot zapisuje w logu
+  `re-entry cooldown unavailable this cycle` i przez ten jeden cykl handluje
+  bez przerwy. Jedno nieudane zapytanie nie jest warte zatrzymania bota.
+
+### Skąd się wzięła lista dziesięciu symboli
+
+Dziesięć kontraktów krypto o największym obrocie 24h, odczytanych wprost z
+giełdy 2026-09-24: BTC, ETH, XRP, SOL, ZEC, NEAR, HYPE, DOGE, 1000PEPE, BCH.
+Dziesięć zamiast dawnych czterdziestu: na świecach 15-minutowych dziesięć
+symboli daje już około 25 wejść dziennie, a najpłynniejsze rynki to te, na
+których zlecenie rynkowe wypełnia się najbliżej ceny, od której liczono stop.
+Ranking zmienia się z dnia na dzień — lepiej go co jakiś czas zmierzyć na
+nowo, niż ufać tej liście w nieskończoność.
+
+Bybit ma **762** wieczyste kontrakty USDT i pobranie wszystkich nie wchodzi w
+grę: jeden cykl trwałby około 14 minut, czyli prawie całą 15-minutową świecę,
+więc każdy cykl działałby na świecy, której już nie ma.
+
+Surowy ranking po obrocie **nie jest samym krypto**. Siedzą w nim
+tokenizowane akcje i surowce — 2026-09-24 w pierwszej dwunastce były SOXL,
+ropa (CL) i złoto (XAU), wcześniej także AAPL, TSLA, MSTR, SKHYNIX i XAG —
+które chodzą wedle innego zegara i innej logiki niż cokolwiek, pod co te
+strategie budowano. Nic w metadanych API ich nie odróżnia: `contractType`
 jest identyczny, `fetch_currencies()` nic nie zwraca na hoście demo, a handel
 idzie 24/7, więc test „martwych świec" też ich nie wyłapuje. Zostały więc
 wykluczone z nazwy, a wszystko, czego tożsamości nie dało się ustalić na
@@ -424,6 +528,34 @@ zmienności danego instrumentu. Zmierzone na żywo w tej samej chwili: ATR14 to
 więc na jednym rynku za ciasne, a na drugim za szerokie, i to rynek decyduje
 na którym. Gdy ATR nie da się policzyć, kod sam wraca do wartości
 procentowych.
+
+Stop to **3×ATR**, cel **6×ATR**. Podręcznikowe 2×ATR to stop na świecach
+dziennych; świeca 15-minutowa to w porównaniu głównie szum i potrzebuje
+więcej miejsca. W powtórce 3/6 wygrało z 2/4 w obu połowach próby.
+
+### Skąd te ustawienia: powtórka na 26 dniach
+
+Cztery strategie na świecach 15-minutowych, dziesięć symboli, 25,8 dnia do
+2026-09-24, prowizja taker 0,11% za wejście i wyjście. Wyniki to zsumowane
+procenty z pojedynczych transakcji (bez procentu składanego); każdy wiersz
+dokłada jedną zmianę do wiersza wyżej:
+
+| Wariant | 1. połowa (rynek spadał) | 2. połowa (rynek rósł) |
+|---|---|---|
+| wyjście przy złamaniu reżimu włączone, bez przerwy po zamknięciu (stare zasady) | -65,6% | +36,3% |
+| wyjście przy złamaniu reżimu wyłączone | -48,3% | +39,6% |
+| + 3 świece przerwy przed ponownym wejściem | -43,3% | +74,4% |
+| + stop 3×ATR / cel 6×ATR (**wybrane**) | -35,1% | +79,1% |
+
+Wybrany zestaw dał około 25 transakcji dziennie, 46% trafionych, pozycja
+trwała średnio około trzech godzin, a średni wynik to +0,07% na transakcję po
+prowizjach. Przerwa przed ponownym wejściem jest częścią tego zestawu i ma
+własne ustawienie, `REENTRY_COOLDOWN_BARS=3` (patrz *Jeden sygnał, jedna
+transakcja*). Każdą zmianę zostawiono tylko dlatego, że
+pomogła w **obu** połowach, a nie tylko w sumie. Bot gra wyłącznie na wzrosty:
+na spadającym rynku nadal traci i żaden parametr tego nie zmienia. Powtórka
+nie modelowała trailingu, poślizgu ani odrzucania transakcji, których
+przycięty stop jest węższy niż 1×ATR.
 
 **Dlaczego wejścia to zdarzenia, a wyjścia to stany.** Wejście szuka
 *przecięcia* w ostatnich `SIGNAL_LOOKBACK_BARS` zamkniętych świecach — wejście
@@ -471,10 +603,38 @@ błędzie krytycznym.
 
 Zamknięcia bot wykrywa odpytując `/v5/position/closed-pnl` za ostatnie
 `CLOSED_LOOKBACK_MINUTES`. Żeby to samo zamknięcie nie waliło ci w telefon na
-każdym runie przez cały okres okna, lista już zgłoszonych ID jedzie między
-runami w `actions/cache`. To **czysta kosmetyka** — pudło w cache kosztuje
-duplikat powiadomienia, nigdy duplikat transakcji. Jeśli chcesz to wyłączyć,
+każdym runie przez cały okres okna, lista już zgłoszonych ID leży w
+`state/notified.json`. Plik trzyma dokładnie te zamknięcia, które zwrócił
+ostatni odczyt — starsze wypadły z okna i nie wrócą. To **czysta kosmetyka**
+— zgubiony plik kosztuje duplikat powiadomienia, nigdy duplikat transakcji. Jeśli chcesz to wyłączyć,
 ustaw `NOTIFIED_STATE_FILE=""`.
+
+### Dlaczego pozycja się zamknęła
+
+Każde zamknięcie mówi, co je spowodowało: w logu na końcu linii
+`position closed: ...` (`why=...`), a w telefonie w ostatniej linijce
+powiadomienia (`why: ...`). Nie trzeba już grzebać w historii zleceń Bybita.
+
+| `why:` | Co się stało |
+|---|---|
+| `stop loss` | zadziałał stop loss ustawiony przy wejściu |
+| `take profit` | cena doszła do celu |
+| `trailing stop` | zadziałał trailing stop |
+| `liquidation` | **likwidacja**: giełda sama zamknęła pozycję i zabrała cały depozyt |
+| `bot exit` | bot zamknął pozycję, bo reguła strategii kazała wyjść (przychodzi wtedy też osobny push "Exit signal" z powodem) |
+| `closed outside the bot (...)` | zamknięte poza botem, np. ręcznie w aplikacji Bybita; w nawiasie Bybit podaje, skąd przyszło zlecenie (`CreateByClosing` to przycisk zamknięcia pozycji); bez nawiasu, jeśli tego nie poda |
+| `unknown` | nie udało się tego sprawdzić |
+
+Skąd bot to wie: likwidację Bybit zaznacza wprost w rekordzie zamknięcia
+(`execType=BustTrade`). W pozostałych przypadkach bot raz dopytuje historię
+zleceń o zlecenie, które zamknęło pozycję, i patrzy, kto je wysłał. Zlecenia
+bota mają w `orderLinkId` jego prefiks (`ORDER_LINK_PREFIX`, domyślnie `cf`),
+więc da się je odróżnić od twoich ręcznych. Te wartości sprawdzono na
+prawdziwych zleceniach z konta demo, nie tylko w dokumentacji.
+
+Każde zamknięcie jest sprawdzane tylko raz, przy pierwszym zgłoszeniu. Jeśli
+sprawdzenie się nie uda, powiadomienie i tak przychodzi, tylko z
+`why: unknown` — brak powodu nie może zjeść informacji o zamknięciu.
 
 ---
 

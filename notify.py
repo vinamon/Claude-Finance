@@ -98,6 +98,9 @@ def positionClosed(record):
         "qty %s" % record.get("qty"),
         "entry %s -> exit %s" % (record.get("avg_entry"), record.get("avg_exit")),
         "pnl %s USDT" % pnl,
+        # A loss means something different after a stop loss than after a
+        # liquidation or a manual close, and the phone is where it is read.
+        "why: %s" % record.get("cause"),
     ]
     return push(
         "Closed %s" % record.get("symbol"),
