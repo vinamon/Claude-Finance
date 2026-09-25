@@ -46,6 +46,9 @@ baseline = {
     # for a test about something else cannot quietly hold back its entry.
     "reentry_cooldown_bars": 0,
     "dummy_mode": True,
+    # Most tests read the per-symbol reasons, so they run with the full log;
+    # the tests about the short log turn it off by name.
+    "log_detail": True,
     "force_entry": False,
     "github_event_name": "local",
     "entry_timeframe": "15m",

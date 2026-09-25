@@ -133,6 +133,11 @@ ntfy_server = envStr("NTFY_SERVER", "https://ntfy.sh")
 # switched on deliberately, never by forgetting.
 dummy_mode = envBool("DUMMY_MODE", True)
 
+# How much a cycle prints. false: one line per cycle plus whatever opened,
+# closed or went wrong. true: every symbol's decision and why, for debugging a
+# strategy. Errors and warnings print either way.
+log_detail = envBool("LOG_DETAIL", False)
+
 # GitHub Actions sets this. "workflow_dispatch" means a human pressed the
 # button; "schedule" means cron fired.
 github_event_name = envStr("GITHUB_EVENT_NAME", "local")

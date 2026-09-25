@@ -317,9 +317,11 @@ def sleepUntil(seconds):
 
 
 def runCycle(cycle):
-    print("\n" + "=" * 70)
+    if config.log_detail:
+        print("\n" + "=" * 70)
     print("cycle %d  %s" % (cycle, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    print("=" * 70)
+    if config.log_detail:
+        print("=" * 70)
     try:
         return main.main()
     except KeyboardInterrupt:
@@ -358,6 +360,25 @@ def run():
     if not os.environ.get("ORDER_BUCKET_SECONDS"):
         config.order_bucket_seconds = max(60, interval * 60)
 
+    if config.log_detail:
+        printSettings(interval, looping, args.force_entry)
+    else:
+        print("Claude-Finance: %s, %d symbols, %.0f USDT at %dx, dummy_mode=%s%s"
+              % ("loop every %d min" % interval if looping else "single run",
+                 len(config.symbols), config.position_notional_usdt, config.leverage,
+                 config.dummy_mode, ", force-entry" if args.force_entry else ""))
+    if not looping:
+        return runCycle(1)
+
+    # A second loop is the mistake worth catching, and only loops collide -
+    # a single run finishes before it can race anything.
+    warnAboutDuplicates()
+
+    print("Ctrl+C to stop.")
+    return loop(interval)
+
+
+def printSettings(interval, looping, force_entry):
     print("Claude-Finance runner")
     print("  mode:        %s" % ("loop every %d min" % interval if looping else "single run"))
     print("  strategy:    %s (%s)"
@@ -379,16 +400,11 @@ def run():
     print("  dummy_mode:  %s" % config.dummy_mode)
     print("  max open:    %s" % (config.max_open_positions or "unlimited"))
     print("  symbols:     %s" % (", ".join(config.symbols) or "(none configured)"))
-    if args.force_entry:
+    if force_entry:
         print("  force-entry: yes, first cycle only")
-    if not looping:
-        return runCycle(1)
 
-    # A second loop is the mistake worth catching, and only loops collide -
-    # a single run finishes before it can race anything.
-    warnAboutDuplicates()
 
-    print("\nCtrl+C to stop.")
+def loop(interval):
     cycle = 0
     last_code = 0
     try:
@@ -411,13 +427,11 @@ def run():
             # asked for. Sleep only the remainder.
             remaining = interval * 60 - elapsed
             if remaining <= 0:
-                print("")
-                print("cycle took %.0fs, longer than the %d min interval - "
+                print("  cycle took %.0fs, longer than the %d min interval - "
                       "starting the next one immediately" % (elapsed, interval))
                 continue
             next_run = datetime.now() + timedelta(seconds=remaining)
-            print("")
-            print("cycle took %.0fs, next at %s"
+            print("  took %.0fs, next at %s"
                   % (elapsed, next_run.strftime("%H:%M:%S")))
             sleepUntil(remaining)
     except KeyboardInterrupt:

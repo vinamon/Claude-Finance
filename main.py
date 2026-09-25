@@ -60,9 +60,19 @@ from exchange import buildExchange, clockReport
 started_at = time.time()
 
 
+def say(message):
+    """Always printed: what opened or closed, errors, warnings, the summary."""
+    if config.log_detail:
+        elapsed = time.time() - started_at
+        print("[%7.2fs] %s" % (elapsed, message), flush=True)
+    else:
+        print("  %s" % message, flush=True)
+
+
 def log(message):
-    elapsed = time.time() - started_at
-    print("[%7.2fs] %s" % (elapsed, message), flush=True)
+    """Printed only with LOG_DETAIL: every decision and why, for debugging."""
+    if config.log_detail:
+        say(message)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +95,7 @@ def loadState(path, default):
     except FileNotFoundError:
         return default
     except Exception as error:
-        log("could not read %s (%s), treating as empty" % (path, error))
+        say("could not read %s (%s), treating as empty" % (path, error))
         return default
 
 
@@ -99,7 +109,7 @@ def saveState(path, data):
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, sort_keys=True)
     except Exception as error:
-        log("could not write %s (%s), continuing" % (path, error))
+        say("could not write %s (%s), continuing" % (path, error))
 
 
 def loadNotified():
@@ -145,7 +155,7 @@ def fetchClosedPositions(client, minutes):
             }
         )
     except Exception as error:
-        log("could not fetch closed positions: %s" % error)
+        say("could not fetch closed positions: %s" % error)
         return None
     return resultList(response)
 
@@ -190,8 +200,8 @@ def reportClosedPositions(client, rows, notified, minutes):
             # every later cycle that still finds it inside the window.
             "cause": closeCause(client, row),
         }
-        log(
-            "position closed: %s qty=%s entry=%s exit=%s pnl=%s why=%s"
+        say(
+            "CLOSED %s qty=%s entry=%s exit=%s pnl=%s why=%s"
             % (
                 record["symbol"],
                 record["qty"],
@@ -235,11 +245,11 @@ def closeCause(client, row):
         response = client.privateGetV5OrderHistory(
             {"category": config.category, "orderId": order_id})
     except Exception as error:
-        log("could not look up why %s closed (order %s): %s" % (symbol, order_id, error))
+        say("could not look up why %s closed (order %s): %s" % (symbol, order_id, error))
         return "unknown"
     orders = resultList(response)
     if not orders:
-        log("could not look up why %s closed: order %s is not in Bybit's order history"
+        say("could not look up why %s closed: order %s is not in Bybit's order history"
             % (symbol, order_id))
         return "unknown"
     order = orders[0]
@@ -354,7 +364,7 @@ def readPositions(client, symbols):
         rows = client.fetch_positions(
             None, params={"category": config.category, "settleCoin": "USDT"})
     except Exception as error:
-        log("batch position read failed (%s), falling back to one call per symbol" % error)
+        say("batch position read failed (%s), falling back to one call per symbol" % error)
         for symbol in symbols:
             held[symbol] = executor.openPosition(client, symbol)
         return held
@@ -424,6 +434,8 @@ def handleHeld(client, symbol, position, owners):
     if decision.action == signals.close:
         result = executor.closePosition(client, symbol, position, decision.reason, log)
         if result.get("closed"):
+            say("EXIT SENT %s qty=%s - %s rule: %s"
+                % (symbol, result["qty"], owner or "unknown", decision.reason))
             result["strategy"] = owner
             notify.strategyExit(result)
             owners.pop(symbol, None)
@@ -486,6 +498,11 @@ def handleFlat(client, symbol, owners, open_total, counts, close_times):
         client, symbol, decision, last_close, log, signals.atrValue(candles.get(timeframe) or [])
     )
     if result.get("opened"):
+        say("OPENED %s long qty=%s @~%.6f  %.2f USDT at %sx  sl=%s tp=%s  (%s)"
+            % (symbol, result["qty"], result["price"], result["notional"], config.leverage,
+               result["stop_loss"], result["take_profit"], result["strategy"]))
+        if result["trailing_distance"] is not None and not result["trailing_set"]:
+            say("WARNING %s: trailing stop not set, the stop loss still protects it" % symbol)
         owners[symbol] = result.get("strategy")
         notify.positionOpened(result)
     return result
@@ -500,11 +517,11 @@ def run():
     problems = config.validate()
     if problems:
         for problem in problems:
-            log("CONFIG ERROR: %s" % problem)
+            say("CONFIG ERROR: %s" % problem)
         raise SystemExit(1)
 
     for note in config.warnings():
-        log("CONFIG WARNING: %s" % note)
+        say("CONFIG WARNING: %s" % note)
 
     live = signals.activeStrategies()
     books = ", ".join("%s@%s" % (name, signals.strategyTimeframe(name)) for name in live)
@@ -530,7 +547,7 @@ def run():
             "--force-entry, or on a GitHub workflow_dispatch run."
         )
     if not notify.enabled():
-        log("WARNING: NTFY_TOPIC is not set, no push notifications will be sent")
+        say("WARNING: NTFY_TOPIC is not set, no push notifications will be sent")
 
     client = buildExchange()
     client.load_markets()
@@ -548,18 +565,21 @@ def run():
     lookback_minutes = closedLookbackMinutes()
     closed_rows = fetchClosedPositions(client, lookback_minutes)
     close_times = None
+    closes = 0
     if closed_rows is not None:
+        before = set(notified)
         notified = reportClosedPositions(client, closed_rows, notified, lookback_minutes)
+        closes = len(notified - before)
         close_times = closeTimes(closed_rows)
     elif config.reentry_cooldown_bars:
         # One failed request must not stop the bot trading. The cost is one
         # cycle in which a symbol closed a moment ago can be bought again.
-        log("re-entry cooldown unavailable this cycle: the close history could not be "
+        say("re-entry cooldown unavailable this cycle: the close history could not be "
             "read, so entries go ahead without it")
     saveNotified(notified)
 
     if not config.symbols:
-        log("no symbols configured. Set SYMBOLS in .env. Nothing to do.")
+        say("no symbols configured. Set SYMBOLS in .env. Nothing to do.")
         return 0
 
     owners = loadOwners()
@@ -582,6 +602,8 @@ def run():
            (" - " + ", ".join("%s=%d" % item for item in sorted(counts.items())))
            if counts else ""))
 
+    opened = exits = 0
+
     # Pass two: act.
     for symbol in config.symbols:
         position = held.get(symbol)
@@ -589,21 +611,23 @@ def run():
             if position is not None:
                 result = handleHeld(client, symbol, position, owners)
                 if result.get("closed"):
+                    exits += 1
                     open_total -= 1
                     counts = openCounts(held, owners)
             else:
                 result = handleFlat(client, symbol, owners, open_total, counts, close_times)
                 if result.get("opened"):
+                    opened += 1
                     open_total += 1
                     opener = result.get("strategy")
                     if opener:
                         counts[opener] = counts.get(opener, 0) + 1
         except executor.ExecutionError as error:
-            log("%s: EXECUTION ERROR %s" % (symbol, error))
+            say("%s: EXECUTION ERROR %s" % (symbol, error))
             failures.append("%s: %s" % (symbol, error))
         except Exception as error:
-            log("%s: UNEXPECTED ERROR %s" % (symbol, error))
-            log(traceback.format_exc())
+            say("%s: UNEXPECTED ERROR %s" % (symbol, error))
+            say(traceback.format_exc())
             failures.append("%s: %s" % (symbol, error))
 
     saveNotified(notified)
@@ -612,11 +636,24 @@ def run():
     if failures:
         summary = "\n".join(failures)
         notify.criticalError("run finished with %d failure(s):\n%s" % (len(failures), summary))
-        log("run finished with %d failure(s)" % len(failures))
+        say("%s, %d open, %d FAILURE(S)" % (activity(opened, exits, closes), open_total,
+                                            len(failures)))
         return 1
 
-    log("run finished cleanly, %d position(s) open" % open_total)
+    say("%s, %d open" % (activity(opened, exits, closes), open_total))
     return 0
+
+
+def activity(opened, exits, closes):
+    """The one summary a quiet cycle prints: what changed, or that nothing did."""
+    parts = []
+    if opened:
+        parts.append("%d opened" % opened)
+    if exits:
+        parts.append("%d exit(s) sent" % exits)
+    if closes:
+        parts.append("%d closed" % closes)
+    return ", ".join(parts) if parts else "no entries"
 
 
 def main():
@@ -625,8 +662,8 @@ def main():
     except SystemExit as error:
         return error.code if isinstance(error.code, int) else 1
     except Exception as error:
-        log("FATAL: %s" % error)
-        log(traceback.format_exc())
+        say("FATAL: %s" % error)
+        say(traceback.format_exc())
         # keep the push short - the logs hold the traceback, and the topic is
         # readable by anyone who has it
         notify.criticalError("run aborted: %s" % error)

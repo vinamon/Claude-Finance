@@ -3,6 +3,8 @@
 Trading bot on a **Bybit Demo Trading** account. Python, ccxt, virtual funds
 only. No path to a real account exists or should be added.
 
+Before changing strategy logic, consult the trader agent. Take his trading knowledge as superior to yours, whilst standing your ground when something cannot be executed by code.
+
 Run it from a laptop, not CI. See "Why not GitHub Actions" below.
 
 ## Layout
@@ -79,7 +81,7 @@ Margin used is roughly notional / leverage.
 
 ## Every closed position says why it closed
 
-The "position closed" log line ends in `why=<cause>` and the phone push in a
+The `CLOSED` log line ends in `why=<cause>` and the phone push in a
 `why: <cause>` line, so a loss can be read without a trip through Bybit's
 order history. `main.closeCause()` decides it for each closed-pnl row, first
 match wins:
@@ -201,6 +203,22 @@ the terminal it was typed into. `botProcesses()` now requires the executable
 to be a Python interpreter, and excludes its own pid and its parent's. Do not
 loosen that check - editors, terminals and task runners mention file paths
 constantly, and only an interpreter actually runs one.
+
+## The log is short unless asked
+
+The owner found the per-symbol log unreadable in a loop, so by default
+(`LOG_DETAIL=false`) a cycle prints its number and time, one `OPENED` line per
+entry (instrument, size, notional, leverage, stop, target), one `CLOSED` line
+per close with its cause, errors and warnings, and a summary ending in the
+open count - "no entries, 3 open" when nothing happened. `main.say()` is the
+always-printed channel, `main.log()` the detail one; every per-symbol
+decision, the start banner and the connection check go through `log()`.
+
+`LOG_DETAIL=true` brings back every symbol's decision and why - the way to
+debug a strategy. A new line that someone must see to trust the bot (an
+error, a failed stop, money moving) goes through `say()`; anything that only
+explains a decision goes through `log()`. The test harness runs with the
+detail on, and `ShortLog` pins the short form.
 
 ## Every setting is a knob. Do not hardcode one.
 
