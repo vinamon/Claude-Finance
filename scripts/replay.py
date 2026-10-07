@@ -193,15 +193,12 @@ def loadCandles(client, symbol, timeframe, start_ms, end_ms, offline):
 
 def bracket(decision, price, atr_value, tick):
     """(plan, refused) for an entry at `price`, from the executor's own maths."""
-    try:
-        targets = executor.exitPrices({"tick_size": tick}, price, atr_value)
-    except executor.ExecutionError:
-        return None, "price"
-    too_tight, _ = executor.stopTooTight(targets, atr_value)
-    if too_tight:
-        return None, "min-stop"
-    return {"side": "long", "stop": targets["stop_loss"], "target": targets["take_profit"],
-            "capped": bool(targets["capped"])}, None
+    targets = executor.planEntry({"tick_size": tick}, decision.side, decision.setup, price,
+                                 atr_value)
+    if targets["refused"]:
+        return None, targets["refused"][0]
+    return {"side": decision.side, "stop": targets["stop_loss"],
+            "target": targets["take_profit"], "capped": bool(targets["capped"])}, None
 
 
 def simulate(task):
@@ -276,14 +273,15 @@ def simulate(task):
         # closedCandles() drops unread; a copy of this bar stands in for it.
         candles = {timeframe: window + [rows[k]]}
         if position is not None:
-            decision = signals.exitSignal(symbol, candles, position["strategy"])
+            decision = signals.exitSignal(symbol, candles, position["strategy"],
+                                          position["side"])
             if decision.action == signals.close:
                 pending = ("exit", None)
             continue
         if last_close_ms is not None and open_ms + step_ms - last_close_ms < wait_ms:
             continue
         decision = signals.entrySignal(symbol, candles)
-        if decision.action == signals.buy:
+        if decision.action == signals.enter:
             pending = ("enter", (decision, signals.atrValue(candles[timeframe])))
 
     if position is not None:

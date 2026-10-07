@@ -18,7 +18,7 @@ Run it from a laptop, not CI. See "Why not GitHub Actions" below.
 | `notify.py` | ntfy.sh push |
 | `main.py` | one pass: closed-position reports, exits, entries |
 | `run.py` | laptop runner, the loop/once switch |
-| `tests/` | one bot cycle end to end against a fake Bybit (`fake_bybit.py`). Standard `unittest`, no network |
+| `tests/` | `test_cycle.py`: one bot cycle end to end against a fake Bybit (`fake_bybit.py`). `test_helpers.py`: pure signal and bracket helpers called directly. Standard `unittest`, no network |
 
 ## Facts verified against Bybit's v5 docs. Do not "fix" these.
 
@@ -563,14 +563,23 @@ figures above hold only with the control panel in place.
 python -m unittest discover -s tests     from the repo root, no network
 ```
 
-**Tests go through one door.** Every test runs a whole cycle via
-`main.main()` against `tests/fake_bybit.py` and asserts on what reaches the
-exchange, the log and the phone - never on a helper or a state file.
-`runCycle()` pins every setting that shapes a cycle, because the owner's
-`.env` is already loaded into `config` when a test imports it; a test that
-relies on a particular value passes it explicitly. When a cycle starts asking
-Bybit something new, teach the fake to answer it rather than patching around
-it.
+**Behaviour goes through one door.** The cycle tests (`tests/test_cycle.py`)
+run a whole cycle via `main.main()` against `tests/fake_bybit.py` and assert
+on what reaches the exchange, the log and the phone - never on a helper or a
+state file. `runCycle()` pins every setting that shapes a cycle, because the
+owner's `.env` is already loaded into `config` when a test imports it; a test
+that relies on a particular value passes it explicitly. When a cycle starts
+asking Bybit something new, teach the fake to answer it rather than patching
+around it.
+
+**Pure helpers are also tested directly.** Pure signal and bracket helpers -
+`mirror` / `oriented` / `words`, `planEntry`, `positionSide`, and the level
+helpers that follow - have unit tests in `tests/test_helpers.py`. Those
+check a function's contract: its rounding on each side, every refusal code,
+the edge a whole cycle would need a contrived market to reach. Keep them
+apart from the cycle tests, and keep wiring (what a cycle does with the
+answer) in the cycle tests. A helper that touches a client, the clock or a
+file is not pure and does not belong in that file.
 
 ## Conventions
 

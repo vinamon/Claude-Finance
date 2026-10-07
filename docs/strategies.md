@@ -14,7 +14,10 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 
 - **Market:** ten Bybit USDT perpetuals: BTC, ETH, XRP, SOL, ZEC, NEAR, HYPE,
   DOGE, 1000PEPE and BCH. This is a demo account.
-- **Direction:** long only. The bot never shorts.
+- **Direction:** long only. The bot never opens a short. A short already held
+  (opened by hand) is judged by the mirror of the exit rule: breakout closes
+  it on a close above the previous `BREAKOUT_EXIT_LOOKBACK` bars' high, trend
+  when EMA20 is above EMA50.
 - **Clock:** 15-minute candles (`ENTRY_TIMEFRAME=15m`) for every strategy.
   Exits read the same timeframe.
 - **Closed candles only.** The candle still forming is dropped before any

@@ -424,12 +424,13 @@ def fetchCandles(client, symbol, wanted):
 def handleHeld(client, symbol, position, owners):
     """A symbol we are holding: ask the owning strategy whether to let go."""
     size = executor.positionSize(position)
+    side = executor.positionSide(position)
     owner = owners.get(symbol)
-    log("%s: holding %s contracts, opened by %s, checking its exit rule"
-        % (symbol, size, owner or "an unknown rule"))
+    log("%s: holding %s %s contracts, opened by %s, checking its exit rule"
+        % (symbol, side, size, owner or "an unknown rule"))
 
     candles = fetchCandles(client, symbol, signals.exitTimeframes(owner))
-    decision = signals.exitSignal(symbol, candles, owner)
+    decision = signals.exitSignal(symbol, candles, owner, side)
 
     if decision.action == signals.close:
         result = executor.closePosition(client, symbol, position, decision.reason, log)
@@ -458,7 +459,7 @@ def handleFlat(client, symbol, owners, open_total, counts, close_times):
 
     decision = signals.entrySignal(symbol, candles)
 
-    if decision.action != signals.buy:
+    if decision.action != signals.enter:
         log("%s: no entry - %s" % (symbol, decision.reason))
         return {"opened": False, "reason": decision.reason}
 
@@ -498,9 +499,10 @@ def handleFlat(client, symbol, owners, open_total, counts, close_times):
         client, symbol, decision, last_close, log, signals.atrValue(candles.get(timeframe) or [])
     )
     if result.get("opened"):
-        say("OPENED %s long qty=%s @~%.6f  %.2f USDT at %sx  sl=%s tp=%s  (%s)"
-            % (symbol, result["qty"], result["price"], result["notional"], config.leverage,
-               result["stop_loss"], result["take_profit"], result["strategy"]))
+        say("OPENED %s %s qty=%s @~%.6f  %.2f USDT at %sx  sl=%s tp=%s  (%s)"
+            % (symbol, result["side"], result["qty"], result["price"], result["notional"],
+               config.leverage, result["stop_loss"], result["take_profit"],
+               result["strategy"]))
         if result["trailing_distance"] is not None and not result["trailing_set"]:
             say("WARNING %s: trailing stop not set, the stop loss still protects it" % symbol)
         owners[symbol] = result.get("strategy")

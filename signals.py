@@ -26,8 +26,14 @@ STRATEGY_TIMEFRAMES can move any of them to its own clock.
 THE REGIME FILTER IS WHAT MAKES COMBINING THEM COHERENT
 -------------------------------------------------------
 Every strategy may only go long while price is above the slow regime
-average, so they all pull in the same direction and differ only in what
-triggers the entry.
+average, and short while it is below, so they all pull in the same direction
+and differ only in what triggers the entry.
+
+A SHORT IS THE LONG RULE ON A MIRRORED CHART
+--------------------------------------------
+Each rule is written once, for longs. The short side reads the same rule on
+mirror() of the candles and the sentence is told back with words(), so the two
+sides cannot drift apart. A held short is judged by the mirrored exit rule.
 
 WHY ENTRIES ARE EVENTS AND EXITS ARE STATES
 -------------------------------------------
@@ -40,14 +46,19 @@ bar would eventually be missed and leave a position stranded. "Are we on the
 wrong side of the indicator right now" cannot be missed.
 """
 
+import re
 from collections import namedtuple
 
 import config
 
 # Decision actions
-buy = "buy"
+enter = "enter"
 hold = "hold"
 close = "close"
+
+# Sides. A position's side is never stored: it is read from the exchange.
+long = "long"
+short = "short"
 
 
 class Decision:
@@ -56,16 +67,22 @@ class Decision:
     `strategy` names which strategy produced it. In multi-strategy mode that
     tag is what gets written into the order id and remembered, so the exit is
     judged by the same rule that opened the position.
+
+    `side` is the side to open. `setup` is None when the stop and target are
+    the ATR bracket; a strategy that reads them off the chart will hand over
+    its levels there instead.
     """
 
-    def __init__(self, action, reason, strategy=None, votes=None):
+    def __init__(self, action, reason, strategy=None, votes=None, side=long, setup=None):
         self.action = action
         self.reason = reason
         self.strategy = strategy
         self.votes = votes or []
+        self.side = side
+        self.setup = setup
 
     def __repr__(self):
-        return "Decision(%s, %s, %r)" % (self.action, self.strategy, self.reason)
+        return "Decision(%s, %s %s, %r)" % (self.action, self.side, self.strategy, self.reason)
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +102,48 @@ def closedCandles(candles):
     if not candles:
         return []
     return candles[:-1]
+
+
+def mirror(candles):
+    """The same candles upside down: every price negated, high and low swapped.
+
+    A short is the long rule read on this chart. A close above the 20-bar high
+    here is a close below the 20-bar low on the real one, a gap up here is a
+    gap down there, the regime line flips with the price, and ranges - ATR,
+    ADX - are unchanged. So every rule is written once, for longs, and is
+    exactly mirrored for shorts by construction rather than by a second copy
+    that could drift.
+    """
+    return [[row[0], -row[1], -row[3], -row[2], -row[4]] + list(row[5:]) for row in candles]
+
+
+def oriented(candles, side):
+    """The chart a rule for `side` reads: as it is for a long, mirrored for a short."""
+    return mirror(candles) if side == short else candles
+
+
+# Words that mean the opposite on a mirrored chart.
+opposites = {"above": "below", "below": "above", "high": "low", "low": "high",
+             "highs": "lows", "lows": "highs", "higher": "lower", "lower": "higher",
+             "highest": "lowest", "lowest": "highest", "up": "down", "down": "up",
+             "fell": "rose", "rose": "fell", "falls": "rises", "rises": "falls",
+             "bullish": "bearish", "bearish": "bullish", "buy-side": "sell-side",
+             "sell-side": "buy-side", "+DI": "-DI", "-DI": "+DI"}
+opposite_words = re.compile(r"(?<![\w+-])(buy-side|sell-side|[+-]DI|%s)(?![\w-])"
+                            % "|".join(word for word in opposites if word[0].isalpha()))
+
+
+def words(text, side):
+    """A reason written on the mirrored chart, told the way the real chart reads.
+
+    For a short: above and below, high and low and their kin swap places, and
+    the minus sign every mirrored price carries is dropped. Rules print only
+    prices, counts and ranges, none of which is negative on the real chart.
+    """
+    if side != short:
+        return text
+    text = opposite_words.sub(lambda match: opposites[match.group(1)], text)
+    return re.sub(r"(?<![\w.])-(?=\d)", "", text)
 
 
 def closes(candles):
@@ -264,12 +323,13 @@ def formatValue(value):
 # ---------------------------------------------------------------------------
 
 
-def regimeState(candles):
-    """(ok, sentence) - is the market in a regime we are allowed to buy in.
+def regimeState(candles, side=long):
+    """(ok, sentence) - is the market in a regime we may enter in.
 
-    Long only above the slow average. This is the oldest filter in trend
-    trading and the reason a mean-reversion rule can sit next to a
-    trend-following one without the two cancelling out.
+    Above the slow average on the chart the rule reads: long only above it,
+    and on the mirrored chart a short only below it. The oldest filter in
+    trend trading, and what keeps several strategies from taking opposite
+    views of one market.
     """
     if not config.regime_filter:
         return True, "regime filter off"
@@ -285,10 +345,11 @@ def regimeState(candles):
 
     if price[-1] > trend_line[-1]:
         return True, "regime: price %.6f above SMA%d %.6f" % (price[-1], period, trend_line[-1])
-    return False, "regime: price %.6f is below SMA%d %.6f, long entries blocked" % (
+    return False, "regime: price %.6f is below SMA%d %.6f, %s entries blocked" % (
         price[-1],
         period,
         trend_line[-1],
+        side,
     )
 
 
@@ -296,8 +357,9 @@ def regimeBroken(candles):
     """(broken, sentence) - has the regime failed under an open position.
 
     Used as an exit override that applies to every strategy, so a position
-    opened by any of them is closed when the reason to be long at all is gone.
-    Controlled by EXIT_ON_REGIME_BREAK.
+    opened by any of them is closed when the reason to hold it at all is gone.
+    Read on the chart of the position's side, like regimeState. Controlled by
+    EXIT_ON_REGIME_BREAK.
     """
     if not config.exit_on_regime_break or not config.regime_filter:
         return False, "regime-break exit off"
@@ -312,7 +374,7 @@ def regimeBroken(candles):
         return False, "regime exit: SMA%d not seeded yet" % period
 
     if price[-1] < trend_line[-1]:
-        return True, "regime break: price %.6f fell below SMA%d %.6f" % (
+        return True, "regime break: price %.6f is below SMA%d %.6f" % (
             price[-1],
             period,
             trend_line[-1],
@@ -376,7 +438,7 @@ def trendEntry(candles):
                 )
 
         return Decision(
-            buy,
+            enter,
             "trend: EMA%d crossed above EMA%d %d bar(s) ago and is still above "
             "(fast=%.6f slow=%.6f, ADX%d=%s +DI=%s -DI=%s)"
             % (config.ema_fast_period, config.ema_slow_period, bars_ago, fast[-1], slow[-1],
@@ -462,7 +524,7 @@ def breakoutEntry(candles):
         if price[i] > level:
             bars_ago = len(candles) - 1 - i
             return Decision(
-                buy,
+                enter,
                 "breakout: close broke above the %d-bar high %d bar(s) ago "
                 "(close=%.6f level=%.6f)" % (window, bars_ago, price[i], level),
                 "breakout",
@@ -588,6 +650,32 @@ def barsFor(name, candles_by_timeframe, fallback=None):
     return closedCandles(candles_by_timeframe.get(timeframe) or [])
 
 
+def entryFor(name, bars, side):
+    """One strategy's entry rule for one side, read on that side's chart.
+
+    A rule is written once, for longs. A short runs the same rule on the
+    mirrored chart, behind the same regime gate, and the sentence it gives is
+    told back the way the real chart reads. The Decision carries the side to
+    open.
+    """
+    chart = oriented(bars, side)
+    allowed, regime_reason = regimeState(chart, side)
+    if allowed:
+        decision = strategies[name].entry(chart)
+    else:
+        decision = Decision(
+            hold, "%s [%s]: %s" % (name, strategyTimeframe(name), regime_reason), name)
+    return Decision(decision.action, words(decision.reason, side), decision.strategy,
+                    decision.votes, side, decision.setup)
+
+
+def exitFor(name, bars, side):
+    """One strategy's exit rule for a position on `side`, on that side's chart."""
+    decision = strategies[name].exit(oriented(bars, side))
+    return Decision(decision.action, words(decision.reason, side), decision.strategy,
+                    side=side)
+
+
 def evaluateEntries(candles_by_timeframe):
     """Every active entry rule, each evaluated on its own timeframe.
 
@@ -607,12 +695,7 @@ def evaluateEntries(candles_by_timeframe):
             decisions.append(Decision(
                 hold, "%s: no candles on %s" % (name, strategyTimeframe(name)), name))
             continue
-        allowed, regime_reason = regimeState(bars)
-        if not allowed:
-            decisions.append(Decision(
-                hold, "%s [%s]: %s" % (name, strategyTimeframe(name), regime_reason), name))
-            continue
-        decisions.append(strategies[name].entry(bars))
+        decisions.append(entryFor(name, bars, long))
     return decisions
 
 
@@ -622,26 +705,28 @@ def evaluateEntries(candles_by_timeframe):
 
 
 def entrySignal(symbol, candles_by_timeframe):
-    """Decide whether to open a position. Returns a Decision of buy or hold.
+    """Decide whether to open a position. Returns a Decision of enter or hold.
 
     The argument maps a timeframe to that timeframe raw ccxt rows;
     requiredTimeframes() says which ones to fetch.
 
     Every active strategy votes and the position opens when at least
-    config.min_entry_votes of them say buy. The returned Decision carries the
-    highest-priority voter as its strategy, which is what will own the exit,
-    plus the full list of who agreed.
+    config.min_entry_votes of them say enter. Votes count on one side only:
+    the side of the highest-priority strategy that fired, because a long vote
+    and a short vote on one symbol are not agreement. The returned Decision
+    carries that strategy, which is what will own the exit, plus the full
+    list of who agreed.
 
-    In dummy_mode the market is ignored completely: buy only on an explicit
+    In dummy_mode the market is ignored completely: enter only on an explicit
     --force-entry or a GitHub workflow_dispatch run.
     """
     live = activeStrategies()
     if config.dummy_mode:
         owner = live[0] if live else None
         if config.force_entry:
-            return Decision(buy, "dummy_mode: --force-entry given, forcing a test entry", owner)
+            return Decision(enter, "dummy_mode: --force-entry given, forcing a test entry", owner)
         if config.github_event_name == "workflow_dispatch":
-            return Decision(buy, "dummy_mode: manual run, forcing a test entry", owner)
+            return Decision(enter, "dummy_mode: manual run, forcing a test entry", owner)
         return Decision(
             hold,
             "dummy_mode: triggered by %r without --force-entry, so no entry"
@@ -649,7 +734,9 @@ def entrySignal(symbol, candles_by_timeframe):
         )
 
     decisions = evaluateEntries(candles_by_timeframe)
-    voters = [decision for decision in decisions if decision.action == buy]
+    voters = [decision for decision in decisions if decision.action == enter]
+    if voters:
+        voters = [decision for decision in voters if decision.side == voters[0].side]
     names = [decision.strategy for decision in voters]
 
     if len(voters) < config.min_entry_votes:
@@ -663,17 +750,23 @@ def entrySignal(symbol, candles_by_timeframe):
 
     owner = voters[0]
     return Decision(
-        buy,
+        enter,
         "%s [%s on %s] (%d/%d vote(s): %s)"
         % (owner.reason, owner.strategy, strategyTimeframe(owner.strategy),
            len(voters), config.min_entry_votes, ", ".join(names)),
         owner.strategy,
         names,
+        owner.side,
+        owner.setup,
     )
 
 
-def exitSignal(symbol, candles_by_timeframe, owner=None):
+def exitSignal(symbol, candles_by_timeframe, owner=None, side=long):
     """Decide whether to close an open position. Returns close or hold.
+
+    `side` is the side of the position, read from the exchange. Every rule
+    below is judged on that side's chart, so a held short is closed by the
+    mirror of the rule that would close a long, never by the long rule.
 
     The owner is the strategy that opened this position, remembered from the
     entry. Its exit rule is the one that applies, read on its own timeframe:
@@ -696,36 +789,38 @@ def exitSignal(symbol, candles_by_timeframe, owner=None):
     # eight-day view it never traded on.
     judge = owner if known_owner else (live[0] if live else config.strategy)
     bars = barsFor(judge, candles_by_timeframe, config.exit_timeframe)
-    broken, regime_reason = regimeBroken(bars)
+    broken, regime_reason = regimeBroken(oriented(bars, side))
+    regime_reason = words(regime_reason, side)
     if broken:
-        return Decision(close, regime_reason, owner)
+        return Decision(close, regime_reason, owner, side=side)
 
     if known_owner:
-        decision = strategies[owner].exit(bars)
+        decision = exitFor(owner, bars, side)
         return Decision(decision.action, "%s [owner, %s]"
-                        % (decision.reason, strategyTimeframe(owner)), owner)
+                        % (decision.reason, strategyTimeframe(owner)), owner, side=side)
 
     if config.strategy != multi:
-        decision = strategies[config.strategy].exit(bars)
-        return Decision(decision.action, decision.reason, config.strategy)
+        decision = exitFor(config.strategy, bars, side)
+        return Decision(decision.action, decision.reason, config.strategy, side=side)
 
     # Owner unknown or no longer active.
     decisions = []
     for name in live:
         name_bars = barsFor(name, candles_by_timeframe, config.exit_timeframe)
         if name_bars:
-            decisions.append(strategies[name].exit(name_bars))
+            decisions.append(exitFor(name, name_bars, side))
     wants_out = [decision for decision in decisions if decision.action == close]
     detail = " | ".join(decision.reason for decision in decisions)
     note = "owner unknown (%r), falling back to UNKNOWN_OWNER_EXIT=%s" % (
         owner, config.unknown_owner_exit)
 
     if config.unknown_owner_exit == "any" and wants_out:
-        return Decision(close, "%s: %s" % (note, wants_out[0].reason), owner)
+        return Decision(close, "%s: %s" % (note, wants_out[0].reason), owner, side=side)
     if config.unknown_owner_exit == "all" and decisions and len(wants_out) == len(decisions):
-        return Decision(close, "%s: every active strategy wants out. %s" % (note, detail), owner)
+        return Decision(close, "%s: every active strategy wants out. %s" % (note, detail), owner,
+                        side=side)
 
-    return Decision(hold, "%s. %s. %s" % (note, regime_reason, detail), owner)
+    return Decision(hold, "%s. %s. %s" % (note, regime_reason, detail), owner, side=side)
 
 
 def atrValue(candles):

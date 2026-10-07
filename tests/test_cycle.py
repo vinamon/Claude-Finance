@@ -62,6 +62,14 @@ class ForcedEntry(unittest.TestCase):
         self.assertEqual(len(opened), 1, cycle.pushes)
         self.assertIn("strategy trend", opened[0]["message"])
 
+    def testTheSideIsOnThePhone(self):
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, force_entry=True, **risk)
+
+        opened = [push for push in cycle.pushes if push["title"] == "Opened ETH/USDT:USDT"]
+        self.assertTrue(opened[0]["message"].startswith("long qty "), opened[0]["message"])
+
 
 # ARB on 2026-09-15: the last closed candle said 0.14991, and by the time the
 # order went out the market was at 0.14703. A tick fine enough for the
@@ -202,6 +210,59 @@ class UnknownOwner(unittest.TestCase):
         self.assertEqual(len(client.created_orders), 1, cycle.output)
         self.assertEqual(client.created_orders[0]["side"], "sell")
         self.assertTrue(client.created_orders[0]["params"]["reduceOnly"])
+
+
+def breakingHigh(close=2000.0, half_range=10.0):
+    """The mirror of breakingLow: the newest closed bar closes 20 over the
+    10-bar high, which is the breakout exit rule for a short."""
+    bars = candles(close=close, half_range=half_range)
+    bars[-2] = bars[-2][:1] + [close, close + 25.0, close - half_range, close + 20.0, 1.0]
+    return bars
+
+
+class HeldShort(unittest.TestCase):
+    """A short opened by hand has no owner: it is judged by the active
+    strategies' exits, and a short's exit is the mirror of a long's."""
+
+    def testAShortIsClosedByAReduceOnlyBuyWhenTheCloseBreaksTheTenBarHigh(self):
+        client = FakeBybit(bars=breakingHigh(), positions=[heldPosition(side="short")])
+
+        cycle = runCycle(client, active_strategies=["breakout"], unknown_owner_exit="any")
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        order = client.created_orders[0]
+        self.assertEqual(order["side"], "buy")
+        self.assertTrue(order["params"]["reduceOnly"])
+        # told the way the real chart reads, not the mirrored one
+        self.assertIn("breakout exit: close rose above the 10-bar high", cycle.output)
+
+    def testTheSameBarsDoNotCloseALong(self):
+        client = FakeBybit(bars=breakingHigh(), positions=[heldPosition(side="long")])
+
+        cycle = runCycle(client, active_strategies=["breakout"], unknown_owner_exit="any")
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+
+    def testAShortIsNotClosedByTheRuleThatClosesALong(self):
+        # A close under the 10-bar low is the long's exit and the short's
+        # best day.
+        client = FakeBybit(bars=breakingLow(), positions=[heldPosition(side="short")])
+
+        cycle = runCycle(client, active_strategies=["breakout"], unknown_owner_exit="any")
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+
+    def testASideReportedOnlyInBybitsRawRowIsStillRead(self):
+        position = heldPosition(side="short")
+        position["side"] = None
+        client = FakeBybit(bars=breakingHigh(), positions=[position])
+
+        cycle = runCycle(client, active_strategies=["breakout"], unknown_owner_exit="any")
+
+        self.assertEqual([order["side"] for order in client.created_orders], ["buy"], cycle.output)
 
 
 class ClosedPositionReport(unittest.TestCase):
