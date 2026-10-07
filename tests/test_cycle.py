@@ -516,6 +516,23 @@ class ConfigurationWarnings(unittest.TestCase):
 
         self.assertNotIn("CONFIG WARNING", cycle.output)
 
+    def testASettingOfARemovedStrategyIsWarnedAbout(self):
+        # A stale key in .env that is silently ignored costs an afternoon.
+        cycle = runCycle(FakeBybit(), environ={"RSI_PERIOD": "2"})
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertIn("CONFIG WARNING: RSI_PERIOD is set but no longer used - the meanrev "
+                      "strategy was removed", cycle.output)
+
+    def testARemovedStrategyIsRefused(self):
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, force_entry=True, active_strategies=["meanrev"], **risk)
+
+        self.assertEqual(cycle.exit_code, 1, cycle.output)
+        self.assertIn("CONFIG ERROR: ACTIVE_STRATEGIES contains unknown 'meanrev'", cycle.output)
+        self.assertEqual(client.created_orders, [])
+
 
 if __name__ == "__main__":
     unittest.main()

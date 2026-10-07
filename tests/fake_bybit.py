@@ -38,7 +38,7 @@ baseline = {
     "order_link_prefix": "cf",
     "order_bucket_seconds": 120,
     "strategy": "multi",
-    "active_strategies": ["trend", "breakout", "meanrev", "scalp"],
+    "active_strategies": ["trend", "breakout"],
     "min_entry_votes": 1,
     "max_open_positions": 10,
     "max_open_per_strategy": {},
@@ -63,15 +63,8 @@ baseline = {
     "ema_slow_period": 50,
     "adx_period": 14,
     "adx_min": 20.0,
-    "rsi_period": 2,
-    "rsi_oversold": 10.0,
-    "rsi_overbought": 70.0,
-    "meanrev_exit_sma_period": 5,
     "breakout_lookback": 20,
     "breakout_exit_lookback": 10,
-    "bb_period": 20,
-    "bb_stdev": 2.0,
-    "bb_lookback_bars": 2,
     "risk_model": "atr",
     "atr_period": 14,
     "atr_stop_mult": 3.0,
@@ -209,12 +202,15 @@ class FakeBybit:
         return {"result": {"list": [order] if order else []}}
 
 
-def runCycle(client, state_dir=None, **settings):
+def runCycle(client, state_dir=None, environ=None, **settings):
     """Run one bot cycle against `client`.
 
     Returns exit_code, output (everything the cycle printed), pushes (what it
     would have sent to the phone) and state_dir. Pass the state_dir of an
-    earlier cycle to run a second one that remembers the first.
+    earlier cycle to run a second one that remembers the first. `environ`
+    sets environment variables for the cycle; the retired settings are
+    blanked unless it names them, so a stale key in the owner's .env cannot
+    put a warning into every test.
     """
     if state_dir is None:
         state_dir = tempfile.mkdtemp(dir=scratch.name)
@@ -231,10 +227,14 @@ def runCycle(client, state_dir=None, **settings):
     merged["owners_state_file"] = os.path.join(state_dir, "owners.json")
     merged.update(settings)
 
+    variables = {name: "" for name in config.retired_settings}
+    variables.update(environ or {})
+
     output = io.StringIO()
     # patch.multiple refuses a name config does not have, so a misspelt
     # setting fails loudly instead of silently testing nothing.
     with mock.patch.multiple(config, **merged), \
+            mock.patch.dict(os.environ, variables), \
             mock.patch.object(main, "buildExchange", lambda: client), \
             mock.patch.object(notify, "push", recordPush), \
             contextlib.redirect_stdout(output):

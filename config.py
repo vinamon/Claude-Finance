@@ -203,7 +203,11 @@ symbols = envList(
     ],
 )
 
-# "trend", "meanrev", "breakout", or "multi" to run several at once.
+# Every strategy the bot has, in the order the documentation lists them. A
+# name outside this list is refused by validate().
+strategy_names = ("trend", "breakout")
+
+# One of strategy_names, or "multi" to run several at once.
 strategy = envStr("STRATEGY", "multi")
 
 # Which strategies are live when STRATEGY=multi, in PRIORITY order. When more
@@ -302,10 +306,8 @@ signal_lookback_bars = envInt("SIGNAL_LOOKBACK_BARS", 3)
 # regime filter - the gate every strategy passes through
 # ---------------------------------------------------------------------------
 
-# Long entries only while price is above this average. This is what lets a
-# mean-reversion rule and a trend-following rule coexist: mean reversion
-# becomes "buy the dip inside an uptrend" instead of "catch the falling
-# knife". Turning it off makes the strategies fight each other.
+# Long entries only while price is above this average, so every strategy
+# trades with the slow trend rather than against it.
 regime_filter = envBool("REGIME_FILTER", True)
 regime_period = envInt("REGIME_PERIOD", 200)
 
@@ -313,10 +315,10 @@ regime_period = envInt("REGIME_PERIOD", 200)
 # under the regime average.
 #
 # Off by default. Replayed on 15-minute candles over 26 days on ten symbols,
-# turning it off improved results in both halves of the sample: the dip
-# buyers (meanrev, scalp) enter precisely when price sags toward that line, so
-# this exit mostly closed trades that were about to work. Every position
-# already carries an exchange-side stop loss, which is the real protection.
+# turning it off improved results in both halves of the sample: a dip inside
+# an uptrend is exactly what sags toward that line, so this exit mostly
+# closed trades that were about to work. Every position already carries an
+# exchange-side stop loss, which is the real protection.
 exit_on_regime_break = envBool("EXIT_ON_REGIME_BREAK", False)
 
 # What to do about a position whose owning strategy is unknown - opened by
@@ -330,7 +332,7 @@ exit_on_regime_break = envBool("EXIT_ON_REGIME_BREAK", False)
 unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "regime")
 
 # ---------------------------------------------------------------------------
-# strategy 1: trend - EMA crossover confirmed by ADX
+# trend - EMA crossover confirmed by ADX
 # ---------------------------------------------------------------------------
 
 # Shorter and exponential rather than the classic SMA 50/200, which is a
@@ -349,22 +351,7 @@ adx_period = envInt("ADX_PERIOD", 14)
 adx_min = envFloat("ADX_MIN", 20.0)
 
 # ---------------------------------------------------------------------------
-# strategy 2: meanrev - short-RSI pullback inside an uptrend
-# ---------------------------------------------------------------------------
-
-# A 2-period RSI, not the usual 14. The short period is what makes this the
-# Connors "RSI-2" pullback pattern rather than a slow oscillator: it collapses
-# into single digits on an ordinary pullback and recovers within a bar or two,
-# which is precisely the move being bought.
-rsi_period = envInt("RSI_PERIOD", 2)
-rsi_oversold = envFloat("RSI_OVERSOLD", 10.0)
-rsi_overbought = envFloat("RSI_OVERBOUGHT", 70.0)
-
-# Connors' own exit: leave when the close snaps back above a short average.
-meanrev_exit_sma_period = envInt("MEANREV_EXIT_SMA_PERIOD", 5)
-
-# ---------------------------------------------------------------------------
-# strategy 3: breakout - Donchian channel, Turtle style
+# breakout - Donchian channel, Turtle style
 # ---------------------------------------------------------------------------
 
 # Enter on a close above the N-bar high, leave on a close below the M-bar low,
@@ -372,26 +359,6 @@ meanrev_exit_sma_period = envInt("MEANREV_EXIT_SMA_PERIOD", 5)
 # channel gives back most of a move before admitting the trend is over.
 breakout_lookback = envInt("BREAKOUT_LOOKBACK", 20)
 breakout_exit_lookback = envInt("BREAKOUT_EXIT_LOOKBACK", 10)
-
-# ---------------------------------------------------------------------------
-# strategy 4: scalp - Bollinger Band reversion, on a fast timeframe
-# ---------------------------------------------------------------------------
-
-# Bollinger's own bands: a moving average with a channel drawn a number of
-# standard deviations either side of it. Buy a close that has been stretched
-# below the lower band, let go when it has snapped back to the middle.
-#
-# Standard deviation is a genuinely different measure from anything else here
-# - EMA crossovers, RSI and Donchian channels all read price levels, while
-# this reads how FAR the current move sits outside normal variation for this
-# market. 20 and 2.0 are Bollinger's published defaults.
-bb_period = envInt("BB_PERIOD", 20)
-bb_stdev = envFloat("BB_STDEV", 2.0)
-
-# How far back to look for the stretch. Kept short on purpose: on a 15-minute
-# chart a touch of the lower band resolves within a bar or two, so a wide
-# window would re-enter on a move that has already played out.
-bb_lookback_bars = envInt("BB_LOOKBACK_BARS", 2)
 
 # ---------------------------------------------------------------------------
 # risk model - where the stop, target and trail actually go
@@ -533,6 +500,13 @@ kill_grace_seconds = envInt("KILL_GRACE_SECONDS", 5)
 retired_settings = {
     "SMA_FAST_PERIOD": "replaced by EMA_FAST_PERIOD",
     "SMA_SLOW_PERIOD": "replaced by EMA_SLOW_PERIOD (REGIME_PERIOD is the slow line now)",
+    "RSI_PERIOD": "the meanrev strategy was removed",
+    "RSI_OVERSOLD": "the meanrev strategy was removed",
+    "RSI_OVERBOUGHT": "the meanrev strategy was removed",
+    "MEANREV_EXIT_SMA_PERIOD": "the meanrev strategy was removed",
+    "BB_PERIOD": "the scalp strategy was removed",
+    "BB_STDEV": "the scalp strategy was removed",
+    "BB_LOOKBACK_BARS": "the scalp strategy was removed",
 }
 
 
@@ -590,9 +564,8 @@ def warnings():
         )
     if not regime_filter and strategy == "multi" and len(active_strategies) > 1:
         notes.append(
-            "REGIME_FILTER is off while several strategies run together. Mean reversion "
-            "buys weakness and trend following buys strength, so without the filter they "
-            "will take opposite views of the same market."
+            "REGIME_FILTER is off while several strategies run together, so nothing keeps "
+            "them trading the same direction as the slow trend."
         )
     return notes
 
@@ -601,7 +574,7 @@ def validate():
     """Return a list of human-readable configuration problems. Non-empty means
     the run is refused."""
     problems = []
-    known = ("trend", "meanrev", "breakout", "scalp")
+    known = strategy_names
 
     if not bybit_api_key or not bybit_api_secret:
         problems.append("BYBIT_API_KEY / BYBIT_API_SECRET are not set")
@@ -609,7 +582,8 @@ def validate():
 
     if strategy not in known + ("multi",):
         problems.append(
-            "STRATEGY must be one of 'trend', 'meanrev', 'breakout', 'multi', got %r" % strategy
+            "STRATEGY must be one of %s or 'multi', got %r"
+            % (", ".join(repr(name) for name in known), strategy)
         )
 
     if strategy == "multi":
@@ -660,20 +634,10 @@ def validate():
         problems.append("EMA_FAST_PERIOD must be smaller than EMA_SLOW_PERIOD")
     if regime_filter and regime_period < 2:
         problems.append("REGIME_PERIOD must be >= 2 while REGIME_FILTER is on")
-    if rsi_oversold >= rsi_overbought:
-        problems.append("RSI_OVERSOLD must be below RSI_OVERBOUGHT")
-    if rsi_period < 2:
-        problems.append("RSI_PERIOD must be >= 2")
     if adx_min < 0:
         problems.append("ADX_MIN must be >= 0 (0 disables the filter)")
     if signal_lookback_bars < 1:
         problems.append("SIGNAL_LOOKBACK_BARS must be >= 1")
-    if bb_period < 2:
-        problems.append("BB_PERIOD must be >= 2")
-    if bb_stdev <= 0:
-        problems.append("BB_STDEV must be > 0")
-    if bb_lookback_bars < 1:
-        problems.append("BB_LOOKBACK_BARS must be >= 1")
     for name in strategy_timeframes:
         if name not in known:
             problems.append(

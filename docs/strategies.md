@@ -10,7 +10,7 @@ Values are the ones in `.env.example`. Every one of them is a setting (see
 "Every setting is a knob" in `CLAUDE.md`). The reasons behind the values
 are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 
-## The frame all four share
+## The frame they all share
 
 - **Market:** ten Bybit USDT perpetuals: BTC, ETH, XRP, SOL, ZEC, NEAR, HYPE,
   DOGE, 1000PEPE and BCH. This is a demo account.
@@ -20,14 +20,13 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 - **Closed candles only.** The candle still forming is dropped before any
   rule sees it.
 - **Entries are events.** An entry condition must have happened inside the
-  last `SIGNAL_LOOKBACK_BARS=3` closed candles. `meanrev` is the one
-  exception: it reads the newest bar as a state (see below).
+  last `SIGNAL_LOOKBACK_BARS=3` closed candles.
 - **Exits are states.** An exit rule reads the current bar every cycle.
 - **Voting:** `STRATEGY=multi` with `MIN_ENTRY_VOTES=1`. Any one strategy
   saying "buy" opens the position.
-- **Live set:** `ACTIVE_STRATEGIES=breakout`. The other three are described
-  below but are not trading: in the replay meanrev and scalp lost money and
-  trend had too few trades to judge.
+- **Live set:** `ACTIVE_STRATEGIES=breakout`. trend is described below but is
+  not trading: it had too few trades in the replay to judge. meanrev and scalp
+  lost money in the replay and were removed.
 - **Unknown owner:** `UNKNOWN_OWNER_EXIT=regime`. A position whose strategy
   is unknown or no longer active is left to its exchange-side stop and
   target.
@@ -39,9 +38,7 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 
 A long entry is allowed only when the last close is above the
 `REGIME_PERIOD=200` simple moving average on that strategy's timeframe.
-That is about two days of 15-minute bars. The filter is what lets trend
-following and mean reversion run side by side: mean reversion becomes "buy
-the dip inside an uptrend".
+That is about two days of 15-minute bars.
 
 The filter gates entries only. `EXIT_ON_REGIME_BREAK=false`: a position is
 not closed when price falls back below the line.
@@ -57,17 +54,6 @@ not closed when price falls back below the line.
 - **Caveat:** it wins rarely (27% of trades over one measured month) and earns
   its money in rare large moves.
 
-## meanrev: Connors RSI-2 pullback
-
-- **Entry:** RSI(`RSI_PERIOD=2`) on the newest closed bar is at or below
-  `RSI_OVERSOLD=10`. This is read as a state, not a window, because a
-  2-period RSI leaves oversold within a bar or two.
-- **Exit:** whichever comes first:
-  - the close is above SMA(`MEANREV_EXIT_SMA_PERIOD=5`);
-  - RSI2 is at or above `RSI_OVERBOUGHT=70`.
-- **Caveat:** it wins often with small gains. It was built on equity indices,
-  which mean-revert more than crypto does.
-
 ## breakout: Donchian channel, Turtle style
 
 - **Entry:** a close above the highest high of the previous
@@ -77,15 +63,6 @@ not closed when price falls back below the line.
   `BREAKOUT_EXIT_LOOKBACK=10` bars.
 - **Why the asymmetry:** it is the original Turtle rule. A symmetric exit
   gives back most of the move before admitting the trend is over.
-
-## scalp: Bollinger Band reversion
-
-- **Entry:** a close below the lower band within the last
-  `BB_LOOKBACK_BARS=2` bars, and price is still under the middle band now.
-  The bands are SMA(`BB_PERIOD=20`) ± `BB_STDEV=2.0` standard deviations.
-- **Exit:** the close is at or above the middle band.
-- **Caveat:** its wins are small, so fees (about 0.11% per round trip) take a
-  real share.
 
 ## Risk, applied to every entry
 
@@ -111,11 +88,10 @@ is not running.
 - **Re-entry cooldown.** After any close on a symbol, `REENTRY_COOLDOWN_BARS=3`
   candles pass before any strategy may enter it again.
 
-## How the four relate
+## How they relate
 
-`trend` and `breakout` buy strength. `meanrev` and `scalp` buy weakness. The
-regime filter makes all four buy only in an uptrend, so they differ in the
-trigger, not the direction.
+`trend` and `breakout` both buy strength, and the regime filter lets them buy
+only in an uptrend.
 
-As a set they are textbook systems, not a demonstrated edge. In the replay
-they lost in the falling half and won in the rising one (see `CLAUDE.md`).
+They are textbook systems, not a demonstrated edge. In the replay they lost
+in the falling half and won in the rising one (see `CLAUDE.md`).

@@ -9,31 +9,25 @@ one reads config.<name>, and each of those reads an environment variable of
 the same upper-case name, which means every knob is settable from .env without
 touching code. If you find a bare number in a strategy here, it is a bug.
 
-FOUR STRATEGIES, AND THEY CAN ALL RUN AT ONCE
----------------------------------------------
+STRATEGIES, AND THEY CAN ALL RUN AT ONCE
+----------------------------------------
   trend     EMA fast/slow crossover, confirmed by ADX trend strength
-  meanrev   Connors-style short-RSI pullback bought inside an uptrend
   breakout  Donchian (Turtle) channel breakout, asymmetric exit
-  scalp     Bollinger band stretch below the lower band, back to the middle
+
+Each one is a block: its entry and exit functions, its candle budget, and
+one line in the `strategies` registry. Removing a strategy is deleting its
+block and its line, nothing else.
 
 config.strategy picks one, or "multi" runs every strategy in
 config.active_strategies and enters when at least config.min_entry_votes of
-them agree. By default all four read the same 15-minute candles;
-STRATEGY_TIMEFRAMES can move any of them to its own clock. They are textbook
-systems with published track records, not edges we discovered. Assume each
-loses money after fees until a backtest says otherwise.
+them agree. By default all read the same 15-minute candles;
+STRATEGY_TIMEFRAMES can move any of them to its own clock.
 
 THE REGIME FILTER IS WHAT MAKES COMBINING THEM COHERENT
 -------------------------------------------------------
-Trend following and mean reversion are philosophical opposites: one buys
-strength, the other buys weakness. Run naively side by side they fight, and
-one strategy's entry is the other's exit.
-
-config.regime_filter resolves that. Every strategy may only go long while
-price is above the slow regime average, so mean reversion becomes "buy the dip
-IN an uptrend" - which is the well-documented version of it - rather than
-"catch the falling knife". They all then pull in the same direction and
-differ only in what triggers the entry.
+Every strategy may only go long while price is above the slow regime
+average, so they all pull in the same direction and differ only in what
+triggers the entry.
 
 WHY ENTRIES ARE EVENTS AND EXITS ARE STATES
 -------------------------------------------
@@ -44,12 +38,9 @@ Exit looks at the current *state* instead. This bot polls on a timer and
 therefore misses most individual bars, so an exit defined as a single crossing
 bar would eventually be missed and leave a position stranded. "Are we on the
 wrong side of the indicator right now" cannot be missed.
-
-The one deliberate exception is the mean-reversion entry, which reads the
-newest closed bar as a state. A 2-period RSI resolves within a bar or two, so
-an event window would let a stale reading re-open a position that just took
-profit. The comment at meanrevEntry spells this out.
 """
+
+from collections import namedtuple
 
 import config
 
@@ -175,45 +166,6 @@ def wilderSmooth(values, period):
     return out
 
 
-def rsi(values, period):
-    """Wilder's RSI, seeded with a simple average of the first `period`
-    changes. This is the version charting packages draw."""
-    out = [None] * len(values)
-    if period <= 0 or len(values) <= period:
-        return out
-
-    gains = 0.0
-    losses = 0.0
-    for i in range(1, period + 1):
-        change = values[i] - values[i - 1]
-        if change >= 0:
-            gains += change
-        else:
-            losses -= change
-    avg_gain = gains / period
-    avg_loss = losses / period
-    out[period] = rsiFromAverages(avg_gain, avg_loss)
-
-    for i in range(period + 1, len(values)):
-        change = values[i] - values[i - 1]
-        gain = change if change > 0 else 0.0
-        loss = -change if change < 0 else 0.0
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-        out[i] = rsiFromAverages(avg_gain, avg_loss)
-
-    return out
-
-
-def rsiFromAverages(avg_gain, avg_loss):
-    if avg_loss == 0:
-        return 100.0
-    if avg_gain == 0:
-        return 0.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
 def trueRanges(candles):
     """Wilder's true range per bar. None for the first bar, which has no
     previous close to gap from."""
@@ -283,44 +235,6 @@ def adx(candles, period):
     return wilderSmooth(dx, period), plus_di, minus_di
 
 
-def stdev(values, period):
-    """Population standard deviation over a rolling window, aligned to values.
-
-    Population rather than sample, because that is what Bollinger bands use
-    and what every charting package draws. The sample form would widen every
-    band slightly and quietly shift every signal.
-    """
-    out = [None] * len(values)
-    if period <= 0 or len(values) < period:
-        return out
-    for i in range(period - 1, len(values)):
-        window = values[i - period + 1:i + 1]
-        mean = sum(window) / period
-        variance = sum((value - mean) ** 2 for value in window) / period
-        out[i] = variance ** 0.5
-    return out
-
-
-def bollinger(values, period, deviations):
-    """(middle, upper, lower) bands, each aligned to values.
-
-    The middle band is a simple moving average; the outer two sit a number of
-    standard deviations either side, so they widen when the market gets
-    volatile and tighten when it calms down. That self-scaling is the point:
-    "unusually far from normal" means the same thing on BTC and on a memecoin.
-    """
-    middle = sma(values, period)
-    spread = stdev(values, period)
-    upper = [None] * len(values)
-    lower = [None] * len(values)
-    for i in range(len(values)):
-        if middle[i] is None or spread[i] is None:
-            continue
-        upper[i] = middle[i] + deviations * spread[i]
-        lower[i] = middle[i] - deviations * spread[i]
-    return middle, upper, lower
-
-
 def crossedAbove(fast, slow, index):
     """True if fast crossed from at-or-below to above slow at `index`."""
     if index < 1:
@@ -330,16 +244,6 @@ def crossedAbove(fast, slow, index):
     if None in (prev_fast, prev_slow, now_fast, now_slow):
         return False
     return prev_fast <= prev_slow and now_fast > now_slow
-
-
-def crossedAboveLevel(values, level, index):
-    """True if values crossed from at-or-below `level` to above it at `index`."""
-    if index < 1:
-        return False
-    prev_value, now_value = values[index - 1], values[index]
-    if prev_value is None or now_value is None:
-        return False
-    return prev_value <= level and now_value > level
 
 
 def lookbackRange(length, bars):
@@ -421,7 +325,7 @@ def regimeBroken(candles):
 
 
 # ---------------------------------------------------------------------------
-# strategy 1: trend - EMA crossover confirmed by ADX
+# trend - EMA crossover confirmed by ADX
 #
 # The most-traded system there is, plus the standard fix for its worst flaw.
 # A bare moving-average crossover bleeds in sideways markets because it fires
@@ -491,6 +395,13 @@ def trendEntry(candles):
     )
 
 
+def trendCandles():
+    """Closed candles trend needs: the slow EMA and ADX are recursive and only
+    settle after several times their period."""
+    return max(config.ema_slow_period * config.warmup_multiplier,
+               config.adx_period * config.warmup_multiplier * 2) + config.signal_lookback_bars + 5
+
+
 def trendExit(candles):
     price = closes(candles)
     need = config.ema_slow_period + 1
@@ -519,96 +430,7 @@ def trendExit(candles):
 
 
 # ---------------------------------------------------------------------------
-# strategy 2: meanrev - short-period RSI pullback inside an uptrend
-#
-# The Connors "RSI-2" pattern: in an established uptrend, buy the bar where a
-# very short RSI collapses into deep oversold, and let go as soon as price
-# snaps back over a short average. Published, widely replicated, and known for
-# a high win rate with small wins.
-#
-# What makes it defensible rather than knife-catching is the regime filter
-# above: it only ever buys weakness inside strength. Without that filter it is
-# a completely different, and much worse, strategy.
-#
-# Honest caveat: RSI-2 was built on equity indices, which mean-revert. Crypto
-# trends harder and pays mean reversion less. Expect a lower hit rate here
-# than the literature quotes.
-# ---------------------------------------------------------------------------
-
-
-def meanrevEntry(candles):
-    price = closes(candles)
-    need = max(config.rsi_period, config.meanrev_exit_sma_period) + 2
-    if len(price) < need:
-        return Decision(hold, "meanrev: need %d closed candles, have %d" % (need, len(price)),
-                        "meanrev")
-
-    values = rsi(price, config.rsi_period)
-    if values[-1] is None:
-        return Decision(hold, "meanrev: RSI%d not seeded yet" % config.rsi_period, "meanrev")
-
-    # Read as a STATE on the newest closed bar, not as an event over a window.
-    # A 2-period RSI leaves oversold within a bar or two, so scanning a window
-    # would let a reading that has already resolved re-open a position that
-    # just closed at target. The regime filter and the one-position-per-symbol
-    # rule are what keep this from re-entering endlessly.
-    if values[-1] <= config.rsi_oversold:
-        return Decision(
-            buy,
-            "meanrev: RSI%d is %.2f, at or below the %.1f oversold line, on the newest "
-            "closed bar (close=%.6f)"
-            % (config.rsi_period, values[-1], config.rsi_oversold, price[-1]),
-            "meanrev",
-        )
-
-    return Decision(
-        hold,
-        "meanrev: RSI%d is %.2f, above the %.1f oversold line"
-        % (config.rsi_period, values[-1], config.rsi_oversold),
-        "meanrev",
-    )
-
-
-def meanrevExit(candles):
-    price = closes(candles)
-    need = max(config.rsi_period, config.meanrev_exit_sma_period) + 2
-    if len(price) < need:
-        return Decision(hold, "meanrev exit: need %d closed candles, have %d" % (need, len(price)),
-                        "meanrev")
-
-    values = rsi(price, config.rsi_period)
-    fast_line = sma(price, config.meanrev_exit_sma_period)
-
-    # Connors' own exit is the close crossing back above a short average: the
-    # bounce being bought has happened, take it. The overbought line is kept
-    # as a second door for the move that runs further than the average.
-    if fast_line[-1] is not None and price[-1] > fast_line[-1]:
-        return Decision(
-            close,
-            "meanrev exit: close %.6f snapped back above SMA%d %.6f, the bounce played out"
-            % (price[-1], config.meanrev_exit_sma_period, fast_line[-1]),
-            "meanrev",
-        )
-
-    if values[-1] is not None and values[-1] >= config.rsi_overbought:
-        return Decision(
-            close,
-            "meanrev exit: RSI%d reached overbought (rsi=%.2f >= %.1f)"
-            % (config.rsi_period, values[-1], config.rsi_overbought),
-            "meanrev",
-        )
-
-    return Decision(
-        hold,
-        "meanrev exit: close %.6f still under SMA%d %s and RSI%d %s below %.1f"
-        % (price[-1], config.meanrev_exit_sma_period, formatValue(fast_line[-1]),
-           config.rsi_period, formatValue(values[-1]), config.rsi_overbought),
-        "meanrev",
-    )
-
-
-# ---------------------------------------------------------------------------
-# strategy 3: breakout - Donchian channel, Turtle style
+# breakout - Donchian channel, Turtle style
 #
 # Buy a close above the highest high of the previous N bars; leave on a close
 # below the lowest low of the previous M, where M is SHORTER than N.
@@ -656,6 +478,11 @@ def breakoutEntry(candles):
     )
 
 
+def breakoutCandles():
+    return (max(config.breakout_lookback, config.breakout_exit_lookback)
+            + config.signal_lookback_bars + 5)
+
+
 def breakoutExit(candles):
     window = config.breakout_exit_lookback
     need = window + 2
@@ -685,112 +512,17 @@ def breakoutExit(candles):
 
 
 # ---------------------------------------------------------------------------
-# strategy 4: scalp - Bollinger Band reversion on a fast timeframe
-#
-# Bollinger bands are a moving average with a channel drawn BB_STDEV standard
-# deviations either side. Buy a close stretched below the lower band, let go
-# once it has snapped back to the middle. That is the published use of the
-# indicator, not an invention.
-#
-# It earns its place next to the other three by measuring something none of
-# them measure. EMA crossovers, RSI and Donchian channels all read where price
-# IS; standard deviation reads how far the current move sits outside normal
-# variation for this market, which is why the same rule works on BTC and on a
-# memecoin without retuning.
-#
-# It shares the 15-minute clock with the other three by default. Should a
-# slower rule ever go back to hourly candles through STRATEGY_TIMEFRAMES, give
-# this one a MAX_OPEN_PER_STRATEGY budget too, or it fires so much more often
-# that it takes every position slot before the slow rule can reach one.
-#
-# Honest caveat: on a fast clock fees stop being a rounding error. At 6xATR on
-# 15-minute candles the target is roughly 1.5-6%, but this rule usually exits
-# earlier, at the middle band, for a fraction of that - against about 0.11%
-# for a taker round trip. Survivable, but not free, and the reason this is not
-# on 5-minute candles.
-# ---------------------------------------------------------------------------
-
-
-def scalpEntry(candles):
-    price = closes(candles)
-    need = config.bb_period + config.bb_lookback_bars + 2
-    if len(price) < need:
-        return Decision(hold, "scalp: need %d closed candles, have %d" % (need, len(price)),
-                        "scalp")
-
-    middle, upper, lower = bollinger(price, config.bb_period, config.bb_stdev)
-    if lower[-1] is None or middle[-1] is None:
-        return Decision(hold, "scalp: bands not seeded yet", "scalp")
-
-    # A short window, not a state. A band touch on a 15-minute chart resolves
-    # within a bar or two, so reading it as a state - or scanning a wide
-    # window - would re-enter on a move that has already finished.
-    for i in lookbackRange(len(price), config.bb_lookback_bars):
-        if lower[i] is None or middle[i] is None or price[i] >= lower[i]:
-            continue
-        # Only while price has not already recovered to the middle band. That
-        # is this strategy's own exit, and entering on top of it would open a
-        # trade that the very next cycle closes.
-        if price[-1] >= middle[-1]:
-            continue
-        bars_ago = len(price) - 1 - i
-        stretch = 100.0 * (middle[i] - price[i]) / middle[i] if middle[i] else 0.0
-        return Decision(
-            buy,
-            "scalp: close broke below the lower Bollinger band %d bar(s) ago, %.2f%% under "
-            "the %d-bar mean (close=%.6f lower=%.6f middle=%.6f)"
-            % (bars_ago, stretch, config.bb_period, price[i], lower[i], middle[i]),
-            "scalp",
-        )
-
-    return Decision(
-        hold,
-        "scalp: no close below the lower Bollinger band in the last %d bar(s) "
-        "(close=%.6f lower=%s middle=%s)"
-        % (config.bb_lookback_bars, price[-1], formatValue(lower[-1]), formatValue(middle[-1])),
-        "scalp",
-    )
-
-
-def scalpExit(candles):
-    price = closes(candles)
-    need = config.bb_period + 2
-    if len(price) < need:
-        return Decision(hold, "scalp exit: need %d closed candles, have %d" % (need, len(price)),
-                        "scalp")
-
-    middle, upper, lower = bollinger(price, config.bb_period, config.bb_stdev)
-    if middle[-1] is None:
-        return Decision(hold, "scalp exit: bands not seeded yet", "scalp")
-
-    # Reversion to the mean IS the trade. Once price is back at the middle
-    # band the reason for being in it has been paid out, and holding on turns
-    # a mean-reversion trade into a directional bet it was never sized for.
-    if price[-1] >= middle[-1]:
-        return Decision(
-            close,
-            "scalp exit: close %.6f reverted to the %d-bar mean %.6f, the stretch is paid out"
-            % (price[-1], config.bb_period, middle[-1]),
-            "scalp",
-        )
-
-    return Decision(
-        hold,
-        "scalp exit: close %.6f still below the %d-bar mean %.6f"
-        % (price[-1], config.bb_period, middle[-1]),
-        "scalp",
-    )
-
-
-# ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
 
+# What each strategy is: its entry rule, its exit rule, and how many closed
+# candles it needs. Priority between strategies is not here; it is the order
+# of ACTIVE_STRATEGIES.
+Strategy = namedtuple("Strategy", "entry exit candles")
+
 strategies = {
-    "trend": (trendEntry, trendExit),
-    "meanrev": (meanrevEntry, meanrevExit),
-    "breakout": (breakoutEntry, breakoutExit),
-    "scalp": (scalpEntry, scalpExit),
+    "trend": Strategy(trendEntry, trendExit, trendCandles),
+    "breakout": Strategy(breakoutEntry, breakoutExit, breakoutCandles),
 }
 
 multi = "multi"
@@ -880,7 +612,7 @@ def evaluateEntries(candles_by_timeframe):
             decisions.append(Decision(
                 hold, "%s [%s]: %s" % (name, strategyTimeframe(name), regime_reason), name))
             continue
-        decisions.append(strategies[name][0](bars))
+        decisions.append(strategies[name].entry(bars))
     return decisions
 
 
@@ -969,12 +701,12 @@ def exitSignal(symbol, candles_by_timeframe, owner=None):
         return Decision(close, regime_reason, owner)
 
     if known_owner:
-        decision = strategies[owner][1](bars)
+        decision = strategies[owner].exit(bars)
         return Decision(decision.action, "%s [owner, %s]"
                         % (decision.reason, strategyTimeframe(owner)), owner)
 
     if config.strategy != multi:
-        decision = strategies[config.strategy][1](bars)
+        decision = strategies[config.strategy].exit(bars)
         return Decision(decision.action, decision.reason, config.strategy)
 
     # Owner unknown or no longer active.
@@ -982,7 +714,7 @@ def exitSignal(symbol, candles_by_timeframe, owner=None):
     for name in live:
         name_bars = barsFor(name, candles_by_timeframe, config.exit_timeframe)
         if name_bars:
-            decisions.append(strategies[name][1](name_bars))
+            decisions.append(strategies[name].exit(name_bars))
     wants_out = [decision for decision in decisions if decision.action == close]
     detail = " | ".join(decision.reason for decision in decisions)
     note = "owner unknown (%r), falling back to UNKNOWN_OWNER_EXIT=%s" % (
@@ -1025,18 +757,6 @@ def requiredCandles(name=None):
         needs.append(config.regime_period + config.signal_lookback_bars + 5)
 
     for strategy_name in names:
-        if strategy_name == "trend":
-            needs.append(config.ema_slow_period * config.warmup_multiplier
-                         + config.signal_lookback_bars + 5)
-            needs.append(config.adx_period * config.warmup_multiplier * 2
-                         + config.signal_lookback_bars + 5)
-        elif strategy_name == "meanrev":
-            needs.append(config.rsi_period * config.warmup_multiplier
-                         + config.meanrev_exit_sma_period + config.signal_lookback_bars + 5)
-        elif strategy_name == "breakout":
-            needs.append(max(config.breakout_lookback, config.breakout_exit_lookback)
-                         + config.signal_lookback_bars + 5)
-        elif strategy_name == "scalp":
-            needs.append(config.bb_period * 3 + config.bb_lookback_bars + 5)
+        needs.append(strategies[strategy_name].candles())
 
     return min(config.candle_ceiling, max(needs))
