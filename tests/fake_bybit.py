@@ -82,6 +82,7 @@ baseline = {
     "ict_allow_capped_stop": False,
     "ict_min_rr": 1.5,
     "ict_fallback_target_r": 2.0,
+    "pullback_displacement_min_atr": 1.5,
     "risk_model": "atr",
     "atr_period": 14,
     "atr_stop_mult": 3.0,
@@ -183,6 +184,42 @@ def ictLong():
         (2022, 2030, 2010, 2026),                       # candle 3
         (2026, 2032, 2018, 2024),
         (2024, 2026, 2006, 2014),                       # the retest
+    ]
+    return series(bars)
+
+
+def pullbackLong(leg_low=1996.0, draw=None):
+    """Candles forming one pullback long, newest closed bar the retest, at
+    09:45 in New York.
+
+    The same slow climb, then a swing low at 1980, a swing high H at 2040, a
+    leg low at `leg_low` (1996: above the 1980) and one big candle, 2010 to
+    2046, that closes above H and leaves the gap 2012-2024 between candle 1's
+    high and candle 3's low. The first retest: low 2022, close 2026. Candle 1's
+    low, 1998, is the structure. Nothing untouched stands above the price, so
+    the target is the fallback multiple of the risk. ATR is about 14. `draw`
+    puts one more swing high, untouched since, into the climb at that price.
+    """
+    bars = risingRun(300, 2000.0, 0.6, 4.0)
+    if draw is not None:
+        o, h, l, c = bars[240]
+        bars[240] = (o, draw, l, c)
+    bars += [
+        (2000, 2006, 1994, 2002),
+        (2002, 2004, 1990, 1992),
+        (1992, 1996, 1980, 1990),                       # swing low 1980
+        (1990, 2000, 1988, 1998),
+        (1998, 2008, 1992, 2006),
+        (2006, 2020, 2002, 2018),
+        (2018, 2040, 2014, 2036),                       # swing high H 2040
+        (2036, 2038, 2024, 2026),
+        (2026, 2030, 2018, 2020),
+        (2020, 2024, 2008, 2012),
+        (2012, 2016, leg_low, leg_low + 6),             # the leg low
+        (leg_low + 6, 2012, 1998, 2010),                # candle 1
+        (2010, 2050, 2008, 2046),                       # candle 2, closes above H
+        (2046, 2062, 2024, 2058),                       # candle 3
+        (2058, 2060, 2022, 2026),                       # the retest
     ]
     return series(bars)
 

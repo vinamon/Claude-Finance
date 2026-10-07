@@ -27,10 +27,10 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 - **Exits are states.** An exit rule reads the current bar every cycle.
 - **Voting:** `STRATEGY=multi` with `MIN_ENTRY_VOTES=1`. Any one strategy
   saying "buy" opens the position.
-- **Live set:** `ACTIVE_STRATEGIES=breakout`. trend and ict are described
-  below but are not trading: trend had too few trades in the replay to judge,
-  and ict goes live with the rest of the rework (issue #15). meanrev and scalp
-  lost money in the replay and were removed.
+- **Live set:** `ACTIVE_STRATEGIES=breakout`. trend, ict and pullback are
+  described below but are not trading: trend had too few trades in the replay
+  to judge, and ict and pullback go live with the rest of the rework (issue
+  #15). meanrev and scalp lost money in the replay and were removed.
 - **Unknown owner:** `UNKNOWN_OWNER_EXIT=regime`. A position whose strategy
   is unknown or no longer active is left to its exchange-side stop and
   target.
@@ -95,6 +95,39 @@ ATR(`ATR_PERIOD=14`) on the same candles. Tag `i` in the order id.
 - **Exit.** The exchange-side stop and target only. No trail, no rule exit.
   The exit on a bearish structure shift is deferred.
 
+## pullback: break of a swing high after a higher low, retest of the gap
+
+Long side. ict without the sweep, so the bot trades more often. Tag `p` in the
+order id. Counts are in closed 15-minute candles, sizes in ATR; swings,
+gaps, the retest, kill zones, the live-price check, the stop and the target
+are ict's, with the same `ICT_` settings. Only the leg search below and
+`PULLBACK_DISPLACEMENT_MIN_ATR=1.5` are new.
+
+- **Break, at bar `b`.** `H` is the latest swing high already confirmed when
+  bar `b` closed - judged as of the break bar, not as of today, or a peak that
+  forms after the break would hide it. `b` is the FIRST close above `H`, among
+  `ICT_FVG_MAX_AGE_BARS + SIGNAL_LOOKBACK_BARS = 15` bars of the newest bar.
+  Only the most recent break is judged.
+- **Higher low.** The leg low `LL` is the lowest low from the bar after `H` to
+  `b` (the latest, when tied). It must be strictly above the low of the last
+  swing low before `H`, and `b − index(LL) ≤ ICT_MSS_MAX_BARS=8`. With no
+  swing low before `H` there is nothing to compare, and no trade.
+- **Fair-value gap.** As for ict, with candle 2 in `[LL, b]` and a body of at
+  least `PULLBACK_DISPLACEMENT_MIN_ATR=1.5` ATR (ict asks 1.0). The gap is at
+  least `ICT_FVG_MIN_ATR=0.1` ATR; of several, the one with the highest top.
+- **Retest, kill zones, live price.** As for ict, in the same order, from the
+  gap's third candle.
+- **Stop.** As for ict, with `LL` playing the part of the sweep low:
+  `ICT_STOP_REF=candle1` is candle 1's low, `leglow` is `LL`'s low; either way
+  also under every low from candle 3 to the retest.
+- **Target.** As for ict, with the levels taken from before `LL`: swing highs
+  from `ICT_LIQUIDITY_LOOKBACK_BARS=96` bars before `LL` up to the last one
+  confirmed before it, that nothing has traded above since, and the previous
+  UTC day's high while untouched. `H` itself is never one. Closer than
+  `ICT_MIN_RR=1.5` × risk: no trade. No such level (the usual case):
+  `ICT_FALLBACK_TARGET_R=2.0` × risk.
+- **Exit.** The exchange-side stop and target only. No trail, no rule exit.
+
 ## trend: EMA crossover confirmed by ADX
 
 - **Entry:** EMA(`EMA_FAST_PERIOD=20`) crossed above EMA(`EMA_SLOW_PERIOD=50`)
@@ -128,8 +161,8 @@ is not running.
 - **Measured from the live price.** The stop, target and trail are measured
   from the ticker's last trade just before the order, not from the candle
   close.
-- **`RISK_MODEL=atr`** for trend and breakout (ict reads its stop and target
-  off the chart, see above), with ATR(`ATR_PERIOD=14`) on the entering
+- **`RISK_MODEL=atr`** for trend and breakout (ict and pullback read their stop
+  and target off the chart, see above), with ATR(`ATR_PERIOD=14`) on the entering
   strategy's timeframe:
   - stop: entry − `ATR_STOP_MULT=3.0` × ATR
   - target: entry + `ATR_TARGET_MULT=6.0` × ATR
@@ -147,7 +180,9 @@ is not running.
 
 `trend` and `breakout` both buy strength, and the regime filter lets them buy
 only in an uptrend. `ict` buys a dip under a known low inside that uptrend,
-once the structure has turned back up.
+once the structure has turned back up. `pullback` is the same entry without
+the sweep: it buys the retest after a break of the last swing high that
+followed a higher low.
 
 They are textbook systems, not a demonstrated edge. In the replay they lost
 in the falling half and won in the rising one (see `CLAUDE.md`).

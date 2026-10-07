@@ -226,7 +226,7 @@ symbols = envList(
 
 # Every strategy the bot has, in the order the documentation lists them. A
 # name outside this list is refused by validate().
-strategy_names = ("ict", "trend", "breakout")
+strategy_names = ("ict", "pullback", "trend", "breakout")
 
 # One of strategy_names, or "multi" to run several at once.
 strategy = envStr("STRATEGY", "multi")
@@ -455,6 +455,19 @@ ict_allow_capped_stop = envBool("ICT_ALLOW_CAPPED_STOP", False)
 # multiple of the risk.
 ict_min_rr = envFloat("ICT_MIN_RR", 1.5)
 ict_fallback_target_r = envFloat("ICT_FALLBACK_TARGET_R", 2.0)
+
+# ---------------------------------------------------------------------------
+# pullback - the break of a swing high after a higher low, then the gap retest
+#
+# ict without the sweep (issue #15). Every other setting it reads is an ICT_
+# one above: the swing size, the lookback, the gap and retest rules, the kill
+# zones, the stop, the chase limit and the targets.
+# ---------------------------------------------------------------------------
+
+# The break candle (the gap's middle one) must close up with a body of at least
+# this many ATR. Higher than ict's: without a sweep behind it, only a clear
+# push through the swing high is evidence that the move is real.
+pullback_displacement_min_atr = envFloat("PULLBACK_DISPLACEMENT_MIN_ATR", 1.5)
 
 # ---------------------------------------------------------------------------
 # risk model - where the stop, target and trail actually go
@@ -739,6 +752,7 @@ def validate():
     if breakout_exit_lookback < 0:
         problems.append("BREAKOUT_EXIT_LOOKBACK must be >= 0 (0 means no rule exit)")
     problems.extend(ictProblems())
+    problems.extend(pullbackProblems())
     for name in strategy_timeframes:
         if name not in known:
             problems.append(
@@ -831,3 +845,11 @@ def ictProblems():
                 "database comes from the tzdata package: pip install -r requirements.txt"
                 % (ict_kill_zone_tz, error))
     return problems
+
+
+def pullbackProblems():
+    """validate()'s checks for the pullback settings."""
+    if pullback_displacement_min_atr < 0:
+        return ["PULLBACK_DISPLACEMENT_MIN_ATR must be >= 0, got %s"
+                % pullback_displacement_min_atr]
+    return []

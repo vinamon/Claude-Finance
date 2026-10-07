@@ -14,7 +14,7 @@ Run from the repository root, with the project virtualenv active:
 import time
 import unittest
 
-from fake_bybit import FakeBybit, candles, heldPosition, ictLong, runCycle
+from fake_bybit import FakeBybit, candles, heldPosition, ictLong, pullbackLong, runCycle
 
 # 3 ATR stop, 6 ATR target, and leverage low enough that the liquidation cap
 # (half of 1/5 of the price, 200 at 2000) stays out of the way of a 60 stop.
@@ -416,6 +416,105 @@ class IctLong(unittest.TestCase):
 
         self.assertEqual(cycle.exit_code, 1, cycle.output)
         self.assertIn("CONFIG ERROR: ICT_KILL_ZONES must be 'off' or HH:MM-HH:MM", cycle.output)
+
+
+# pullback trading for real, alone. Same leverage as ict: the cap (3.33% of
+# 2026, about 67) stays clear of the 28-wide structural stop.
+pullback = dict(active_strategies=["pullback"], dummy_mode=False, leverage=15)
+
+
+class PullbackLong(unittest.TestCase):
+    """The setup of fake_bybit.pullbackLong(): H 2040 broken after a leg low
+    of 1996 over the swing low 1980, gap 2012-2024, retest closing at 2026,
+    structure at candle 1's low 1998, nothing untouched above, ATR about 14."""
+
+    def testTheRetestBuysWithTheCandleOneStopAndTheFallbackTarget(self):
+        client = FakeBybit(bars=pullbackLong())
+
+        # No buffer, so the stop is candle 1's low itself: 1998 is wider than
+        # the 1.5 ATR floor (about 2005), and the 28 of risk puts the 2R
+        # target at 2026 + 56.
+        cycle = runCycle(client, ict_stop_buffer_atr=0.0, **pullback)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        order = client.created_orders[0]
+        self.assertEqual(order["side"], "buy")
+        self.assertEqual(order["params"]["stopLoss"]["triggerPrice"], 1998.0)
+        self.assertEqual(order["params"]["takeProfit"]["triggerPrice"], 2082.0)
+        self.assertIn("-p-", order["params"]["orderLinkId"])
+        self.assertEqual(client.trading_stops, [])
+        opened = [push for push in cycle.pushes if push["title"] == "Opened ETH/USDT:USDT"]
+        self.assertIn("strategy pullback", opened[0]["message"])
+
+    def testAnUntouchedHighFromBeforeTheLegIsTheTarget(self):
+        # 2100 is 74 away, 2.6 times the 28 of risk.
+        client = FakeBybit(bars=pullbackLong(draw=2100.0))
+
+        cycle = runCycle(client, ict_stop_buffer_atr=0.0, **pullback)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        order = client.created_orders[0]
+        self.assertEqual(order["params"]["takeProfit"]["triggerPrice"], 2100.0)
+
+    def testAHighCloserThanTheMinimumRewardRiskIsNotBought(self):
+        client = FakeBybit(bars=pullbackLong(draw=2100.0))
+
+        cycle = runCycle(client, ict_min_rr=3.0, **pullback)
+
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("under ICT_MIN_RR=3", cycle.output)
+
+    def testALegLowBelowThePriorSwingLowIsNotBought(self):
+        # 1970 is under the swing low at 1980: a lower low, not a pullback.
+        client = FakeBybit(bars=pullbackLong(leg_low=1970.0))
+
+        cycle = runCycle(client, **pullback)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("not above the prior swing low", cycle.output)
+
+    def testALivePriceThatHasLeftTheGapIsNotChased(self):
+        # 2040 is more than half an ATR above the gap's top of 2024.
+        client = FakeBybit(bars=pullbackLong(), last_price=2040.0)
+
+        cycle = runCycle(client, **pullback)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("has left the gap", cycle.output)
+
+    def testACandleTwoThatIsNotADisplacementIsNotBought(self):
+        # Its 36 body is 2.6 ATR; asking for 4 turns the gap away.
+        client = FakeBybit(bars=pullbackLong())
+
+        cycle = runCycle(client, pullback_displacement_min_atr=4.0, **pullback)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("no gap of", cycle.output)
+
+    def testABadDisplacementIsRefused(self):
+        cycle = runCycle(FakeBybit(bars=pullbackLong()), pullback_displacement_min_atr=-1.0,
+                         **pullback)
+
+        self.assertEqual(cycle.exit_code, 1, cycle.output)
+        self.assertIn("CONFIG ERROR: PULLBACK_DISPLACEMENT_MIN_ATR must be >= 0", cycle.output)
+
+    def testAHeldPullbackPositionIsNotClosedByARule(self):
+        client = FakeBybit(bars=pullbackLong())
+        first = runCycle(client, **pullback)
+        self.assertEqual(len(client.created_orders), 1, first.output)
+
+        client.bars = breakingLow()
+        settings = dict(pullback, unknown_owner_exit="any")
+        second = runCycle(client, state_dir=first.state_dir, **settings)
+
+        self.assertEqual(len(client.created_orders), 1, second.output)
+        self.assertIn("pullback exit: none, left to the exchange-side stop and target",
+                      second.output)
 
 
 class ClosedPositionReport(unittest.TestCase):
