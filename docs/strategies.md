@@ -14,10 +14,10 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 
 - **Market:** ten Bybit USDT perpetuals: BTC, ETH, XRP, SOL, ZEC, NEAR, HYPE,
   DOGE, 1000PEPE and BCH. This is a demo account.
-- **Direction:** long only. The bot never opens a short. A short already held
-  (opened by hand) is judged by the mirror of the exit rule: breakout closes
-  it on a close above the previous `BREAKOUT_EXIT_LOOKBACK` bars' high, trend
-  when EMA20 is above EMA50.
+- **Direction:** long, and short for the strategies named in
+  `SHORT_STRATEGIES` (empty, so long only today). A short is the exact mirror
+  of the long rule; see "Shorts" below. A short already held, opened by the
+  bot or by hand, is judged by the mirror of the exit rule.
 - **Clock:** 15-minute candles (`ENTRY_TIMEFRAME=15m`) for every strategy.
   Exits read the same timeframe.
 - **Closed candles only.** The candle still forming is dropped before any
@@ -26,7 +26,8 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
   last `SIGNAL_LOOKBACK_BARS=3` closed candles.
 - **Exits are states.** An exit rule reads the current bar every cycle.
 - **Voting:** `STRATEGY=multi` with `MIN_ENTRY_VOTES=1`. Any one strategy
-  saying "buy" opens the position.
+  saying "buy" (or "sell", for a short) opens the position. Votes count on one
+  side only: the side of the highest-priority strategy that fired.
 - **Live set:** `ACTIVE_STRATEGIES=breakout`. trend, ict and pullback are
   described below but are not trading: trend had too few trades in the replay
   to judge, and ict and pullback go live with the rest of the rework (issue
@@ -36,16 +37,47 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
   target.
 - **One position per symbol.** The strategy that opened a position owns its
   exit. Only that strategy's exit rule can close it; the exchange-side stops
-  can too.
+  can too. A setup for the other side on a symbol already held is ignored
+  (logged as "holding long, short setup ignored"): the bot never flips or
+  fights its own position.
 
 ## The regime filter (gates every entry)
 
 A long entry is allowed only when the last close is above the
-`REGIME_PERIOD=200` simple moving average on that strategy's timeframe.
-That is about two days of 15-minute bars.
+`REGIME_PERIOD=200` simple moving average on that strategy's timeframe, a
+short entry only when it is below. That is about two days of 15-minute bars.
+On any bar at most one side of a strategy can pass.
 
 The filter gates entries only. `EXIT_ON_REGIME_BREAK=false`: a position is
-not closed when price falls back below the line.
+not closed when price crosses back over the line.
+
+## Shorts
+
+`SHORT_STRATEGIES` names the strategies that may also open a short; empty
+means long only. A short is the long rule read on the mirrored chart: every
+price negated, high and low swapped. Ranges (ATR, ADX) are the same on both
+charts, so every setting means the same on both sides and there are no
+asymmetric defaults. The rules below are written for longs; for a short read
+"above" as "below", "high" as "low", "buy-side" as "sell-side", and so on.
+
+- **Gate:** the last close is below the `REGIME_PERIOD` SMA.
+- **ict short:** a sweep of a confirmed swing high or the previous UTC day's
+  high and a close back under it, a close below the last swing low, the first
+  retest of the bearish gap left by that move. Stop above the structure,
+  target at the nearest untouched sell-side level (swing lows, the previous
+  day's low) that existed before the sweep.
+- **pullback short:** the break of a swing low after a lower high, then the
+  gap retest, as ict.
+- **breakout short:** a close below the lowest low of the previous
+  `BREAKOUT_LOOKBACK=20` bars; exit on a close above the highest high of the
+  previous `BREAKOUT_EXIT_LOOKBACK=10` bars.
+- **trend short:** EMA20 crosses below EMA50 and is still below, with ADX at
+  or above `ADX_MIN=20`; exit when EMA20 is above EMA50.
+- **Brackets:** the stop sits above the live price and the target below it,
+  at the same distances as the long's (3 and 6 ATR, or the setup's levels).
+  The stop rounds up to the tick and the target down, so the stop is never
+  nearer than asked. The liquidation cap holds the stop within half the
+  distance to liquidation above the price, 3.33% at 15x.
 
 ## ict: sweep, structure shift, retest of the gap
 
@@ -164,8 +196,8 @@ is not running.
 - **`RISK_MODEL=atr`** for trend and breakout (ict and pullback read their stop
   and target off the chart, see above), with ATR(`ATR_PERIOD=14`) on the entering
   strategy's timeframe:
-  - stop: entry − `ATR_STOP_MULT=3.0` × ATR
-  - target: entry + `ATR_TARGET_MULT=6.0` × ATR
+  - stop: entry − `ATR_STOP_MULT=3.0` × ATR (a short: entry +)
+  - target: entry + `ATR_TARGET_MULT=6.0` × ATR (a short: entry −)
   - no trailing stop: `ATR_TRAIL_MULT=0`. A trail of 1.5 ATR armed at +3 ATR
     closed most winners well short of the 6 ATR target.
 - **Liquidation cap.** The stop may sit no further than
@@ -182,7 +214,8 @@ is not running.
 only in an uptrend. `ict` buys a dip under a known low inside that uptrend,
 once the structure has turned back up. `pullback` is the same entry without
 the sweep: it buys the retest after a break of the last swing high that
-followed a higher low.
+followed a higher low. Their short sides, when switched on, do the same in a
+downtrend, below the regime line.
 
 They are textbook systems, not a demonstrated edge. In the replay they lost
 in the falling half and won in the rising one (see `CLAUDE.md`).

@@ -240,6 +240,13 @@ strategy = envStr("STRATEGY", "multi")
 # closed two trades in three on their own exit rule, a small loss plus fees.
 active_strategies = envList("ACTIVE_STRATEGIES", ["breakout"])
 
+# Which of the live strategies may also trade short, as a comma list. Empty
+# means long only. A short is the exact mirror of the strategy's long rule,
+# read on the chart turned upside down, with no separate settings: it enters
+# only below the regime line, where the long side may not. A side that fails
+# the replay is left out of this list without touching its long side.
+short_strategies = envList("SHORT_STRATEGIES", [])
+
 # Per-strategy timeframe override, as "name:timeframe,name:timeframe".
 # Anything not listed runs on ENTRY_TIMEFRAME.
 #
@@ -327,8 +334,10 @@ signal_lookback_bars = envInt("SIGNAL_LOOKBACK_BARS", 3)
 # regime filter - the gate every strategy passes through
 # ---------------------------------------------------------------------------
 
-# Long entries only while price is above this average, so every strategy
-# trades with the slow trend rather than against it.
+# Long entries only while price is above this average, short entries (see
+# SHORT_STRATEGIES) only while it is below, so every strategy trades with the
+# slow trend rather than against it, and a long and a short never compete for
+# one symbol.
 regime_filter = envBool("REGIME_FILTER", True)
 regime_period = envInt("REGIME_PERIOD", 200)
 
@@ -656,6 +665,14 @@ def warnings():
             "rare. Expect very few trades." % (min_entry_votes, min_entry_votes)
         )
     live = active_strategies if strategy == "multi" else [strategy]
+    idle = [name for name in short_strategies if name in strategy_names and name not in live]
+    if idle:
+        notes.append(
+            "SHORT_STRATEGIES names %s, which %s not live (see ACTIVE_STRATEGIES and "
+            "STRATEGY), so %s neither side."
+            % (", ".join(idle), "is" if len(idle) == 1 else "are",
+               "it trades" if len(idle) == 1 else "they trade")
+        )
     clocks = sorted({strategy_timeframes.get(name, entry_timeframe) for name in live})
     if len(clocks) > 1 and not max_open_per_strategy:
         notes.append(
@@ -710,6 +727,13 @@ def validate():
                 "MIN_ENTRY_VOTES (%d) is higher than the %d active strateg(ies), so no "
                 "entry can ever fire" % (min_entry_votes, len(live))
             )
+
+    unknown = [name for name in short_strategies if name not in known]
+    if unknown:
+        problems.append(
+            "SHORT_STRATEGIES contains unknown %s - valid names are %s"
+            % (", ".join(repr(name) for name in unknown), ", ".join(known))
+        )
 
     if min_entry_votes < 1:
         problems.append("MIN_ENTRY_VOTES must be >= 1")

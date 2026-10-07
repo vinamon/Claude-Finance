@@ -6,7 +6,8 @@ Shape of a run:
   2. read Bybit's closed-position records once, report the new ones with
      why each closed, and keep their times for the re-entry cooldown
   3. read what is actually held, in ONE request, before deciding anything
-  4. for each symbol holding a position: check the owning strategy exit rule
+  4. for each symbol holding a position: check the owning strategy exit rule,
+     and log a setup for the other side as ignored (no flips)
   5. for each symbol holding nothing: collect every active strategy vote,
      then check the position caps and the re-entry cooldown
   6. log every decision and why, then exit 0, or exit 1 on a real failure
@@ -429,7 +430,12 @@ def handleHeld(client, symbol, position, owners):
     log("%s: holding %s %s contracts, opened by %s, checking its exit rule"
         % (symbol, side, size, owner or "an unknown rule"))
 
-    candles = fetchCandles(client, symbol, signals.exitTimeframes(owner))
+    # The entry rules are read too, below, so one request per timeframe
+    # serves both questions.
+    wanted = signals.exitTimeframes(owner)
+    for timeframe, limit in signals.requiredTimeframes().items():
+        wanted[timeframe] = max(wanted.get(timeframe, 0), limit)
+    candles = fetchCandles(client, symbol, wanted)
     decision = signals.exitSignal(symbol, candles, owner, side)
 
     if decision.action == signals.close:
@@ -443,6 +449,15 @@ def handleHeld(client, symbol, position, owners):
         return result
 
     log("%s: staying in - %s" % (symbol, decision.reason))
+
+    # One position per symbol, so a setup for the other side is never acted
+    # on: the bot does not flip or fight its own position. It is logged so
+    # the strategy can still be judged on what it saw.
+    if not config.dummy_mode:
+        setup = signals.entrySignal(symbol, candles)
+        if setup.action == signals.enter and setup.side != side:
+            log("%s: holding %s, %s setup ignored - %s"
+                % (symbol, side, setup.side, setup.reason))
     return {"held": True, "reason": decision.reason}
 
 
@@ -528,11 +543,12 @@ def run():
     live = signals.activeStrategies()
     books = ", ".join("%s@%s" % (name, signals.strategyTimeframe(name)) for name in live)
     log(
-        "start: strategy=%s (%s) votes=%d/%d regime=%s risk=%s dummy_mode=%s "
+        "start: strategy=%s (%s) shorts=%s votes=%d/%d regime=%s risk=%s dummy_mode=%s "
         "trigger=%s symbols=%d max_open=%s"
         % (
             config.strategy,
             books or "none",
+            ",".join(signals.shortStrategies()) or "none",
             config.min_entry_votes,
             len(live),
             ("SMA%d" % config.regime_period) if config.regime_filter else "off",

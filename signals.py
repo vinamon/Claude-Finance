@@ -36,6 +36,7 @@ A SHORT IS THE LONG RULE ON A MIRRORED CHART
 Each rule is written once, for longs. The short side reads the same rule on
 mirror() of the candles and the sentence is told back with words(), so the two
 sides cannot drift apart. A held short is judged by the mirrored exit rule.
+SHORT_STRATEGIES says which strategies may open a short; sidesFor() reads it.
 
 WHY ENTRIES ARE EVENTS AND EXITS ARE STATES
 -------------------------------------------
@@ -1164,6 +1165,17 @@ def barsFor(name, candles_by_timeframe, fallback=None):
     return closedCandles(candles_by_timeframe.get(timeframe) or [])
 
 
+def sidesFor(name):
+    """The sides this strategy may open, long first: long always, short too
+    when SHORT_STRATEGIES names it."""
+    return [long, short] if name in config.short_strategies else [long]
+
+
+def shortStrategies():
+    """The live strategies that may open a short, in priority order."""
+    return [name for name in activeStrategies() if short in sidesFor(name)]
+
+
 def entryFor(name, bars, side):
     """One strategy's entry rule for one side, read on that side's chart.
 
@@ -1199,8 +1211,13 @@ def evaluateEntries(candles_by_timeframe):
     two. A scalper has no business being blocked by an eight-day view, and a
     swing rule has no business being let in by a two-day one.
 
-    Returns one Decision per strategy, nothing filtered out - a strategy
-    explaining why it did NOT fire is most of the value of the log.
+    Each strategy is read once per side it may open (sidesFor). With the
+    regime filter on, the gate lets at most one side through on any bar -
+    long above the line, short below it - so the two sides of one rule never
+    fire together.
+
+    Returns one Decision per strategy and side, nothing filtered out - a
+    strategy explaining why it did NOT fire is most of the value of the log.
     """
     decisions = []
     for name in activeStrategies():
@@ -1209,7 +1226,8 @@ def evaluateEntries(candles_by_timeframe):
             decisions.append(Decision(
                 hold, "%s: no candles on %s" % (name, strategyTimeframe(name)), name))
             continue
-        decisions.append(entryFor(name, bars, long))
+        for side in sidesFor(name):
+            decisions.append(entryFor(name, bars, side))
     return decisions
 
 

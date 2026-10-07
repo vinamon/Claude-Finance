@@ -39,6 +39,7 @@ baseline = {
     "order_bucket_seconds": 120,
     "strategy": "multi",
     "active_strategies": ["trend", "breakout"],
+    "short_strategies": [],
     "min_entry_votes": 1,
     "max_open_positions": 10,
     "max_open_per_strategy": {},
@@ -222,6 +223,66 @@ def pullbackLong(leg_low=1996.0, draw=None):
         (2058, 2060, 2022, 2026),                       # the retest
     ]
     return series(bars)
+
+
+def reflected(rows, around=4000.0):
+    """The same ccxt rows upside down around a price: each price p becomes
+    `around` - p, high and low swap, times and volumes stay. On 2000-ish
+    charts the result is still a 2000-ish chart, and every setup on `rows`
+    is its mirrored setup here: a short where `rows` has a long."""
+    return [[row[0], around - row[1], around - row[3], around - row[2], around - row[4]]
+            + list(row[5:]) for row in rows]
+
+
+def ictShort():
+    """ictLong() reflected around 4000: the mirrored ict short, newest closed
+    bar the retest. Gap 1990-2010, retest closing at 1986, structure at
+    candle 1's high 2022, one draw at 1900, ATR about 13.4."""
+    return reflected(ictLong())
+
+
+def trendBar(open_price, body):
+    """A bar opening at `open_price` and closing `body` from it, with
+    (20 - |body|) / 2 of wick either side: its true range is 20 whatever the
+    bar before it did, as long as that bar closed where this one opens."""
+    close = open_price + body
+    wick = (20.0 - abs(body)) / 2.0
+    return (open_price, max(open_price, close) + wick, min(open_price, close) - wick, close)
+
+
+def trendUp():
+    """Candles where EMA20 has just crossed back above EMA50 with ADX about
+    48, above the regime line, ATR exactly 20, last close 2106.
+
+    300 flat bars at 2000, 40 bars climbing 4 a bar to 2160, 24 falling 4 a
+    bar to 2064 (EMA20 drops under EMA50), and 3 climbing 14 a bar: the
+    cross is on the newest closed bar. Every bar's true range is 20.
+    """
+    bars, price = [], 2000.0
+    for count, body in ((300, 0.0), (40, 4.0), (24, -4.0), (3, 14.0)):
+        for _ in range(count):
+            bars.append(trendBar(price, body))
+            price = bars[-1][3]
+    return series(bars)
+
+
+def trendDown():
+    """trendUp() reflected around 4000: EMA20 has just crossed below EMA50
+    with ADX about 48, under the regime line, ATR exactly 20, last close
+    1894."""
+    return reflected(trendUp())
+
+
+def breakingDown(close=2000.0, half_range=10.0):
+    """Flat candles whose newest closed bar closes 15 under its open, at
+    `close` - 15, below the 20-bar low: the breakout short entry. Its range
+    is exactly 2 * half_range, so ATR stays 20, and the candle still forming
+    sits at that close, so the live price is the close."""
+    bars = candles(close=close, half_range=half_range)
+    low = close - 2 * half_range
+    bars[-2] = bars[-2][:1] + [close, close, low, close - 15.0, 1.0]
+    bars[-1] = bars[-1][:1] + [close - 15.0] * 4 + [1.0]
+    return bars
 
 
 def heldPosition(symbol="ETH/USDT:USDT", contracts=0.22, side="long"):

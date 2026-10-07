@@ -1,9 +1,10 @@
 """
 Replay the strategies over past candles, with the bot's own code.
 
-    python scripts/replay.py                      every strategy alone, 90 days
+    python scripts/replay.py                      every strategy and side alone, 90 days
+    python scripts/replay.py --sides both         each strategy trading both sides at once
     python scripts/replay.py --days 26 --end 2026-09-24
-    python scripts/replay.py --multi              the ACTIVE_STRATEGIES set, as live
+    python scripts/replay.py --multi              ACTIVE_STRATEGIES and SHORT_STRATEGIES, as live
     python scripts/replay.py --set ICT_MIN_RR=2   one change against the baseline
     python scripts/replay.py --wave 1 --jobs 4    the first wave of variants
 
@@ -22,6 +23,11 @@ HOW A BAR IS PLAYED
      unknown and assuming the better case flatters every strategy. A bar that
      opens beyond a level fills at the open.
   3. the bot decides at this bar's close, seeing only bars up to this one
+
+A side alone is the strategy with only that side's entries taken: the short
+side runs with the strategy in SHORT_STRATEGIES and every long entry it
+signals dropped, so a held long never stands in the way of a short. --sides
+both plays the two together, as the live bot would.
 
 Fees and slippage are charged on both fills, slippage always against the
 trade. The re-entry cooldown is played as the live bot plays it, in candles
@@ -110,11 +116,31 @@ def applySettings(settings, base=None):
     importlib.reload(config)
 
 
-def strategySettings(names, overrides):
-    """The settings for one run: the strategies to trade, then the variant."""
+def strategySettings(names, shorts, overrides):
+    """The settings for one run: the strategies to trade, which of them may
+    short (None leaves SHORT_STRATEGIES as .env has it), then the variant."""
     settings = {"ACTIVE_STRATEGIES": ",".join(names)}
+    if shorts is not None:
+        settings["SHORT_STRATEGIES"] = ",".join(shorts)
     settings.update(overrides)
     return settings
+
+
+def replaySets(args):
+    """(label, strategies, short strategies, the one side taken or None) for
+    every run the arguments ask for."""
+    if args.multi:
+        return [("multi", list(config.active_strategies), None, None)]
+    names = args.strategies.split(",") if args.strategies else list(signals.strategies)
+    sets = []
+    for name in names:
+        if args.sides in ("each", "long"):
+            sets.append(("%s long" % name, [name], [], signals.long))
+        if args.sides in ("each", "short"):
+            sets.append(("%s short" % name, [name], [name], signals.short))
+        if args.sides == "both":
+            sets.append(("%s both sides" % name, [name], [name], None))
+    return sets
 
 
 def refusal():
@@ -211,8 +237,11 @@ def bracket(decision, price, atr_value, tick):
 
 
 def simulate(task):
-    """Play one symbol under one set of settings. Returns trades and refusals."""
-    base, settings, symbol, tick, rows, eval_start_ms, fee, slippage = task
+    """Play one symbol under one set of settings. Returns trades and refusals.
+
+    `only` is the one side whose entries are taken, or None for both.
+    """
+    base, settings, only, symbol, tick, rows, eval_start_ms, fee, slippage = task
     applySettings(settings, base)
 
     timeframe = config.entry_timeframe
@@ -290,7 +319,7 @@ def simulate(task):
         if last_close_ms is not None and open_ms + step_ms - last_close_ms < wait_ms:
             continue
         decision = signals.entrySignal(symbol, candles)
-        if decision.action == signals.enter:
+        if decision.action == signals.enter and only in (None, decision.side):
             pending = ("enter", (decision, signals.atrValue(candles[timeframe])))
 
     if position is not None:
@@ -392,9 +421,11 @@ def halfSums(trades, eval_start_ms, end_ms):
 # ---------------------------------------------------------------------------
 
 
-def runSet(label, settings, data, eval_start_ms, end_ms, args, pool):
-    """Play every symbol under `settings`; return (trades, refusals)."""
-    tasks = [(base_environ, settings, symbol, tick, rows, eval_start_ms, args.fee, args.slippage)
+def runSet(settings, only, data, eval_start_ms, args, pool):
+    """Play every symbol under `settings`, taking the entries of side `only`
+    (None for both); return (trades, refusals)."""
+    tasks = [(base_environ, settings, only, symbol, tick, rows, eval_start_ms, args.fee,
+              args.slippage)
              for symbol, (tick, rows) in data.items()]
     results = pool.map(simulate, tasks) if pool else map(simulate, tasks)
     trades, refused = [], collections.Counter()
@@ -410,8 +441,12 @@ def parseArgs():
     parser.add_argument("--end", help="last day to include, YYYY-MM-DD UTC (default: now)")
     parser.add_argument("--strategies", help="comma list to replay, each alone "
                         "(default: every strategy the bot has)")
+    parser.add_argument("--sides", choices=("each", "long", "short", "both"), default="each",
+                        help="each: every strategy once per side, the side alone (default); "
+                        "long or short: that side alone; both: both sides at once")
     parser.add_argument("--multi", action="store_true",
-                        help="replay ACTIVE_STRATEGIES from .env together, in priority order")
+                        help="replay ACTIVE_STRATEGIES and SHORT_STRATEGIES from .env together, "
+                        "in priority order, as live (ignores --sides)")
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
                         help="a variant to compare against the baseline; repeatable")
     parser.add_argument("--wave", choices=sorted(waves), help="run a wave of variants")
@@ -441,11 +476,7 @@ def main_():
     # Room for the longest window any variant asks for.
     start_ms = eval_start_ms - config.candle_ceiling * step_ms
 
-    if args.multi:
-        sets = [("multi", list(config.active_strategies))]
-    else:
-        names = args.strategies.split(",") if args.strategies else list(signals.strategies)
-        sets = [(name, [name]) for name in names]
+    sets = replaySets(args)
 
     client = None
     if not args.offline:
@@ -476,29 +507,28 @@ def main_():
     pool = concurrent.futures.ProcessPoolExecutor(args.jobs) if args.jobs > 1 else None
     try:
         baseline = {}
-        for label, names in sets:
-            settings = strategySettings(names, {})
+        for label, names, shorts, only in sets:
+            settings = strategySettings(names, shorts, {})
             applySettings(settings)
             why = refusal()
             if why:
                 print("\n== %s: not replayed - %s" % (label, why))
                 continue
-            trades, refused = runSet(label, settings, data, eval_start_ms, end_ms, args, pool)
+            trades, refused = runSet(settings, only, data, eval_start_ms, args, pool)
             printReport("%s, baseline" % label, trades, refused, eval_start_ms, end_ms)
             baseline[label] = halfSums(trades, eval_start_ms, end_ms)
 
         for variant_label, overrides, concerns in variants:
-            for label, names in sets:
+            for label, names, shorts, only in sets:
                 if concerns and not set(concerns) & set(names):
                     continue
-                settings = strategySettings(names, overrides)
+                settings = strategySettings(names, shorts, overrides)
                 applySettings(settings)
                 why = refusal()
                 if why:
                     print("\n== %s, %s: not replayed - %s" % (label, variant_label, why))
                     continue
-                trades, refused = runSet(label, settings, data, eval_start_ms, end_ms,
-                                         args, pool)
+                trades, refused = runSet(settings, only, data, eval_start_ms, args, pool)
                 printReport("%s, %s" % (label, variant_label), trades, refused,
                             eval_start_ms, end_ms)
                 for key, (first, second) in halfSums(trades, eval_start_ms, end_ms).items():
