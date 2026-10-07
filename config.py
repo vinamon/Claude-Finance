@@ -209,7 +209,11 @@ strategy = envStr("STRATEGY", "multi")
 # Which strategies are live when STRATEGY=multi, in PRIORITY order. When more
 # than one fires on the same bar the first listed owns the position, and its
 # exit rule is what will close it. Ignored unless STRATEGY=multi.
-active_strategies = envList("ACTIVE_STRATEGIES", ["trend", "breakout", "meanrev", "scalp"])
+#
+# breakout alone. In the 25.8-day replay it was the one strategy that paid:
+# +0.16% a trade over 313 trades, while meanrev and scalp lost money and
+# closed two trades in three on their own exit rule, a small loss plus fees.
+active_strategies = envList("ACTIVE_STRATEGIES", ["breakout"])
 
 # Per-strategy timeframe override, as "name:timeframe,name:timeframe".
 # Anything not listed runs on ENTRY_TIMEFRAME.
@@ -316,10 +320,14 @@ regime_period = envInt("REGIME_PERIOD", 200)
 exit_on_regime_break = envBool("EXIT_ON_REGIME_BREAK", False)
 
 # What to do about a position whose owning strategy is unknown - opened by
-# hand, or the owner file was lost. "any" closes as soon as any active
-# strategy wants out, "all" waits for unanimity, "regime" leaves it to the
-# regime break and the exchange-side stops.
-unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "any")
+# hand, the owner file was lost, or its strategy is no longer active. "any"
+# closes as soon as any active strategy wants out, "all" waits for unanimity,
+# "regime" leaves it to the regime break and the exchange-side stops.
+#
+# "regime": at any moment one of several exit rules usually says close, so
+# "any" closed an orphaned position within a cycle and paid the fees for
+# nothing. Its stop and target are already on the exchange.
+unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "regime")
 
 # ---------------------------------------------------------------------------
 # strategy 1: trend - EMA crossover confirmed by ADX
@@ -405,10 +413,15 @@ risk_model = envStr("RISK_MODEL", "atr")
 # 15-minute candle is mostly noise by comparison and needs more room. Replayed
 # over 26 days on ten symbols, 3/6 beat 2/4 in both halves of the sample, with
 # fewer trades stopped out by ordinary wiggle.
+#
+# No trail (0). A 1.5 ATR pullback is ordinary on 15-minute candles, so a
+# trail armed at +3 ATR closed most winners between +1.5 and +3 ATR, short of
+# the +6 ATR target that breakout's replay result came from. That replay never
+# modelled the trail at all.
 atr_period = envInt("ATR_PERIOD", 14)
 atr_stop_mult = envFloat("ATR_STOP_MULT", 3.0)
 atr_target_mult = envFloat("ATR_TARGET_MULT", 6.0)
-atr_trail_mult = envFloat("ATR_TRAIL_MULT", 1.5)
+atr_trail_mult = envFloat("ATR_TRAIL_MULT", 0.0)
 atr_trail_activation_mult = envFloat("ATR_TRAIL_ACTIVATION_MULT", 3.0)
 
 # HOW CLOSE THE STOP MAY GET TO THE LIQUIDATION PRICE.
@@ -437,17 +450,14 @@ min_stop_atr_mult = envFloat("MIN_STOP_ATR_MULT", 1.0)
 
 # Percentage model, and the fallback for the ATR model. Fractions of the entry
 # price: 0.05 == 5%. Set any of them to 0 to disable that leg.
-#
-# The stop is a disaster brake, not the primary exit - the strategy's own rule
-# is what normally closes a position - so it is set wide enough to stay out of
-# the way of ordinary noise.
 stop_loss_pct = envFloat("STOP_LOSS_PCT", 0.05)
 take_profit_pct = envFloat("TAKE_PROFIT_PCT", 0.10)
 
 # Trailing stop. Bybit's API takes a PRICE DISTANCE here, not a percentage
 # (verified against the v5 docs: "Trailing stop by price distance"), so this
-# fraction gets multiplied by the entry price before being sent.
-trailing_stop_pct = envFloat("TRAILING_STOP_PCT", 0.03)
+# fraction gets multiplied by the entry price before being sent. Off (0), for
+# the same reason as ATR_TRAIL_MULT.
+trailing_stop_pct = envFloat("TRAILING_STOP_PCT", 0.0)
 
 # Trailing stop activation. The trail stays dormant until price reaches
 # entry * (1 + this).

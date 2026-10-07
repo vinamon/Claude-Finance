@@ -14,7 +14,7 @@ Run from the repository root, with the project virtualenv active:
 import time
 import unittest
 
-from fake_bybit import FakeBybit, candles, runCycle
+from fake_bybit import FakeBybit, candles, heldPosition, runCycle
 
 # 3 ATR stop, 6 ATR target, and leverage low enough that the liquidation cap
 # (half of 1/5 of the price, 200 at 2000) stays out of the way of a 60 stop.
@@ -39,6 +39,17 @@ class ForcedEntry(unittest.TestCase):
         # stop 2000 - 3 x 20, target 2000 + 6 x 20
         self.assertEqual(order["params"]["stopLoss"]["triggerPrice"], 1940.0)
         self.assertEqual(order["params"]["takeProfit"]["triggerPrice"], 2120.0)
+
+    def testWithTheTrailOffNoTrailingStopIsSent(self):
+        # A trail armed at +3 ATR closed most winners short of the 6 ATR
+        # target, so it is off and the entry is one call, not two.
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, force_entry=True, atr_trail_mult=0.0, **risk)
+
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        self.assertEqual(client.trading_stops, [])
+        self.assertNotIn("trailing stop", cycle.output)
 
     def testForcedEntryNamesTheStrategyThatOwnsThePosition(self):
         client = FakeBybit(bars=candles(**flat_2000))
@@ -65,7 +76,7 @@ class LivePriceEntry(unittest.TestCase):
     def testTheStopIsMeasuredFromTheLivePriceNotTheLastClosedCandle(self):
         client = FakeBybit(bars=candles(**arb_candles), last_price=0.14703, **arb)
 
-        cycle = runCycle(client, force_entry=True, **risk)
+        cycle = runCycle(client, force_entry=True, atr_trail_mult=1.5, **risk)
 
         self.assertEqual(cycle.exit_code, 0, cycle.output)
         self.assertEqual(len(client.created_orders), 1, cycle.output)
@@ -159,6 +170,38 @@ def stopLossOrder():
 
 def closePushes(cycle, symbol="ETHUSDT"):
     return [push for push in cycle.pushes if push["title"] == "Closed %s" % symbol]
+
+
+def breakingLow(close=2000.0, half_range=10.0):
+    """Flat candles whose newest closed bar closes 20 under the 10-bar low:
+    the breakout exit rule says close."""
+    bars = candles(close=close, half_range=half_range)
+    bars[-2] = bars[-2][:1] + [close, close + half_range, close - 25.0, close - 20.0, 1.0]
+    return bars
+
+
+class UnknownOwner(unittest.TestCase):
+    def testUnderRegimeAPositionWithAnUnknownOwnerIsLeftToTheExchange(self):
+        # Its stop and target are already on Bybit. One of the exit rules
+        # nearly always says close, so "any" sold such positions within a
+        # cycle for nothing but the fees.
+        client = FakeBybit(bars=breakingLow(), positions=[heldPosition()])
+
+        cycle = runCycle(client, active_strategies=["breakout"], unknown_owner_exit="regime")
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("falling back to UNKNOWN_OWNER_EXIT=regime", cycle.output)
+
+    def testUnderAnyTheSameBarsCloseIt(self):
+        client = FakeBybit(bars=breakingLow(), positions=[heldPosition()])
+
+        cycle = runCycle(client, active_strategies=["breakout"], unknown_owner_exit="any")
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        self.assertEqual(client.created_orders[0]["side"], "sell")
+        self.assertTrue(client.created_orders[0]["params"]["reduceOnly"])
 
 
 class ClosedPositionReport(unittest.TestCase):

@@ -25,6 +25,12 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 - **Exits are states.** An exit rule reads the current bar every cycle.
 - **Voting:** `STRATEGY=multi` with `MIN_ENTRY_VOTES=1`. Any one strategy
   saying "buy" opens the position.
+- **Live set:** `ACTIVE_STRATEGIES=breakout`. The other three are described
+  below but are not trading: in the replay meanrev and scalp lost money and
+  trend had too few trades to judge.
+- **Unknown owner:** `UNKNOWN_OWNER_EXIT=regime`. A position whose strategy
+  is unknown or no longer active is left to its exchange-side stop and
+  target.
 - **One position per symbol.** The strategy that opened a position owns its
   exit. Only that strategy's exit rule can close it; the exchange-side stops
   can too.
@@ -95,8 +101,8 @@ is not running.
   timeframe:
   - stop: entry − `ATR_STOP_MULT=3.0` × ATR
   - target: entry + `ATR_TARGET_MULT=6.0` × ATR
-  - trailing stop: `ATR_TRAIL_MULT=1.5` × ATR, armed once price reaches entry
-    + `ATR_TRAIL_ACTIVATION_MULT=3.0` × ATR
+  - no trailing stop: `ATR_TRAIL_MULT=0`. A trail of 1.5 ATR armed at +3 ATR
+    closed most winners well short of the 6 ATR target.
 - **Liquidation cap.** The stop may sit no further than
   `MAX_STOP_FRACTION_OF_LIQUIDATION=0.5` of the distance to liquidation, about
   3.33% at 15x.

@@ -58,7 +58,7 @@ baseline = {
     "regime_filter": True,
     "regime_period": 200,
     "exit_on_regime_break": False,
-    "unknown_owner_exit": "any",
+    "unknown_owner_exit": "regime",
     "ema_fast_period": 20,
     "ema_slow_period": 50,
     "adx_period": 14,
@@ -76,13 +76,13 @@ baseline = {
     "atr_period": 14,
     "atr_stop_mult": 3.0,
     "atr_target_mult": 6.0,
-    "atr_trail_mult": 1.5,
+    "atr_trail_mult": 0.0,
     "atr_trail_activation_mult": 3.0,
     "max_stop_fraction_of_liquidation": 0.5,
     "min_stop_atr_mult": 1.0,
     "stop_loss_pct": 0.05,
     "take_profit_pct": 0.10,
-    "trailing_stop_pct": 0.03,
+    "trailing_stop_pct": 0.0,
     "trailing_activation_pct": 0.05,
     "leverage": 5,
     "position_notional_usdt": 450.0,
@@ -104,6 +104,12 @@ def candles(count=1000, close=2000.0, half_range=10.0, timeframe_seconds=900):
          close, 1.0]
         for i in range(count)
     ]
+
+
+def heldPosition(symbol="ETH/USDT:USDT", contracts=0.22, side="long"):
+    """One row of ccxt's fetch_positions for a position Bybit holds."""
+    return {"symbol": symbol, "contracts": contracts, "side": side,
+            "info": {"size": str(contracts), "side": "Buy" if side == "long" else "Sell"}}
 
 
 def market(symbol, tick="0.01", qty_step="0.01"):
@@ -164,7 +170,8 @@ class FakeBybit:
         return url
 
     def fetch_positions(self, symbols=None, params=None):
-        return list(self.positions)
+        return [position for position in self.positions
+                if not symbols or position.get("symbol") in symbols]
 
     def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params=None):
         return self.bars[-limit:] if limit else list(self.bars)
