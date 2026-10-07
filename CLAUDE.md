@@ -208,10 +208,10 @@ constantly, and only an interpreter actually runs one.
 
 The owner found the per-symbol log unreadable in a loop, so by default
 (`LOG_DETAIL=false`) a cycle prints its number and time, one `OPENED` line per
-entry (instrument, size, notional, leverage, stop, target), one `CLOSED` line
-per close with its cause, errors and warnings, and a summary ending in the
-open count - "no entries, 3 open" when nothing happened. `main.say()` is the
-always-printed channel, `main.log()` the detail one; every per-symbol
+entry (instrument, side, size, notional, leverage, stop, target), one `CLOSED`
+line per close with its cause, errors and warnings, and a summary ending in
+the open count - "no entries, 3 open" when nothing happened. `main.say()` is
+the always-printed channel, `main.log()` the detail one; every per-symbol
 decision, the start banner and the connection check go through `log()`.
 
 `LOG_DETAIL=true` brings back every symbol's decision and why - the way to

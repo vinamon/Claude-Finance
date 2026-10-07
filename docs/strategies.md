@@ -26,8 +26,9 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
   last `SIGNAL_LOOKBACK_BARS=3` closed candles.
 - **Exits are states.** An exit rule reads the current bar every cycle.
 - **Voting:** `STRATEGY=multi` with `MIN_ENTRY_VOTES=1`. Any one strategy
-  saying "buy" (or "sell", for a short) opens the position. Votes count on one
-  side only: the side of the highest-priority strategy that fired.
+  saying `enter` opens the position, on the side its Decision carries. Votes
+  count on one side only: the side of the highest-priority strategy that
+  fired.
 - **Live set:** `ACTIVE_STRATEGIES=breakout`. trend, ict and pullback are
   described below but are not trading: trend had too few trades in the replay
   to judge, and ict and pullback go live with the rest of the rework (issue
@@ -49,7 +50,11 @@ short entry only when it is below. That is about two days of 15-minute bars.
 On any bar at most one side of a strategy can pass.
 
 The filter gates entries only. `EXIT_ON_REGIME_BREAK=false`: a position is
-not closed when price crosses back over the line.
+not closed when price crosses back over the line. Set to true, the break
+closes every position whose exit is a rule (trend, breakout, also with
+`BREAKOUT_EXIT_LOOKBACK=0`) and one whose owner is unknown. ict and pullback
+are exempt, whether or not they are still live: they close at their
+exchange-side stop and target only.
 
 ## Shorts
 
@@ -70,7 +75,7 @@ asymmetric defaults. The rules below are written for longs; for a short read
   gap retest, as ict.
 - **breakout short:** a close below the lowest low of the previous
   `BREAKOUT_LOOKBACK=20` bars; exit on a close above the highest high of the
-  previous `BREAKOUT_EXIT_LOOKBACK=10` bars.
+  previous `BREAKOUT_EXIT_LOOKBACK=10` bars (0 = no rule exit).
 - **trend short:** EMA20 crosses below EMA50 and is still below, with ADX at
   or above `ADX_MIN=20`; exit when EMA20 is above EMA50.
 - **Brackets:** the stop sits above the live price and the target below it,
@@ -113,7 +118,7 @@ ATR(`ATR_PERIOD=14`) on the same candles. Tag `i` in the order id.
   `ICT_KILL_ZONE_TZ=America/New_York` clock), the retest bar must open inside
   one. Needs the `tzdata` package on Windows.
 - **Live price.** `bottom < live ≤ top + ICT_MAX_CHASE_ATR=0.5` × ATR, or no
-  trade (refusal "chase").
+  trade (refusal "chase"). No ATR to measure with: no trade (refusal "atr").
 - **Stop.** The reference is candle 1's low (`ICT_STOP_REF=candle1`; `leglow`
   is the lowest low from `s` to `m`), or any lower low from candle 3 to the
   retest. `structural = reference − ICT_STOP_BUFFER_ATR=0.1` × ATR, and the
@@ -140,9 +145,10 @@ are ict's, with the same `ICT_` settings. Only the leg search below and
 
 - **Break, at bar `b`.** `H` is the latest swing high already confirmed when
   bar `b` closed - judged as of the break bar, not as of today, or a peak that
-  forms after the break would hide it. `b` is the FIRST close above `H`, among
-  `ICT_FVG_MAX_AGE_BARS + SIGNAL_LOOKBACK_BARS = 15` bars of the newest bar.
-  Only the most recent break is judged.
+  forms after the break would hide it. `b` is the FIRST close above `H`. The
+  search walks back from the newest bar over the last
+  `ICT_FVG_MAX_AGE_BARS + SIGNAL_LOOKBACK_BARS + 1 = 16` bars (`b` at most 15
+  bars before the newest) and judges only the most recent break it finds.
 - **Higher low.** The leg low `LL` is the lowest low from the bar after `H` to
   `b` (the latest, when tied). It must be strictly above the low of the last
   swing low before `H`, and `b − index(LL) ≤ ICT_MSS_MAX_BARS=8`. With no

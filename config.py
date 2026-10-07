@@ -341,8 +341,9 @@ signal_lookback_bars = envInt("SIGNAL_LOOKBACK_BARS", 3)
 regime_filter = envBool("REGIME_FILTER", True)
 regime_period = envInt("REGIME_PERIOD", 200)
 
-# Close any open position, whichever strategy opened it, when price falls back
-# under the regime average.
+# Close an open position, whichever strategy opened it, when price falls back
+# under the regime average - except one opened by a strategy that closes at its
+# exchange-side stop and target only (ict, pullback; see signals.strategies).
 #
 # Off by default. Replayed on 15-minute candles over 26 days on ten symbols,
 # turning it off improved results in both halves of the sample: a dip inside
@@ -687,6 +688,19 @@ def warnings():
             "symbol is let back in while the signal behind its last trade is still live, "
             "and that signal is bought again. Match them to trade each signal once."
             % (reentry_cooldown_bars, signal_lookback_bars)
+        )
+    if ict_fallback_target_r < ict_min_rr:
+        notes.append(
+            "ICT_FALLBACK_TARGET_R (%g) is under ICT_MIN_RR (%g), so a level setup with no "
+            "draw in its direction is taken at %gR while one whose nearest draw is closer than %gR is "
+            "refused." % (ict_fallback_target_r, ict_min_rr, ict_fallback_target_r, ict_min_rr)
+        )
+    if ict_stop_floor_atr < min_stop_atr_mult:
+        notes.append(
+            "ICT_STOP_FLOOR_ATR (%g) is under MIN_STOP_ATR_MULT (%g), so a level setup's "
+            "stop can sit %g ATR from the price, closer than the %g ATR a capped stop is "
+            "refused under as noise."
+            % (ict_stop_floor_atr, min_stop_atr_mult, ict_stop_floor_atr, min_stop_atr_mult)
         )
     if not regime_filter and strategy == "multi" and len(active_strategies) > 1:
         notes.append(

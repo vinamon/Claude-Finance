@@ -42,7 +42,9 @@ THE KEEP RULE
 The sample is split in two halves by entry time. A row passes when it is
 positive in one half and not negative in the other; a variant helps only when
 it improves the baseline in both halves. One good half is a market, not an
-edge.
+edge. A setting ict and pullback share (the ICT_ variants run for both) is
+kept only when it helps ict in both halves and makes pullback worse in
+neither; when the two disagree, the default stays.
 
 Candles are cached under state/candles/, which is gitignored. --offline uses
 the cache alone.
@@ -78,18 +80,23 @@ base_environ = dict(os.environ)
 forced = {"DUMMY_MODE": "false", "STRATEGY": "multi", "MIN_ENTRY_VOTES": "1",
           "LOG_DETAIL": "false"}
 
+# The strategies that read the ICT_ settings. pullback shares ict's retest,
+# kill zones, chase limit, stop and target, so a shared setting is judged on
+# both (the trader's ruling; see THE KEEP RULE above).
+level_strategies = ["ict", "pullback"]
+
 # Variants to try against the baseline, one change at a time:
 # (label, settings, strategies it concerns or None for all).
 waves = {
     "1": [
         ("ICT_KILL_ZONES=02:00-05:00,07:00-11:00",
-         {"ICT_KILL_ZONES": "02:00-05:00,07:00-11:00"}, ["ict"]),
-        ("ICT_MIN_RR=1.0", {"ICT_MIN_RR": "1.0"}, ["ict"]),
-        ("ICT_MIN_RR=2.0", {"ICT_MIN_RR": "2.0"}, ["ict"]),
-        ("ICT_MIN_RR=3.0", {"ICT_MIN_RR": "3.0"}, ["ict"]),
-        ("ICT_STOP_REF=leglow", {"ICT_STOP_REF": "leglow"}, ["ict"]),
-        ("ICT_STOP_FLOOR_ATR=1.0", {"ICT_STOP_FLOOR_ATR": "1.0"}, ["ict"]),
-        ("ICT_STOP_FLOOR_ATR=2.0", {"ICT_STOP_FLOOR_ATR": "2.0"}, ["ict"]),
+         {"ICT_KILL_ZONES": "02:00-05:00,07:00-11:00"}, level_strategies),
+        ("ICT_MIN_RR=1.0", {"ICT_MIN_RR": "1.0"}, level_strategies),
+        ("ICT_MIN_RR=2.0", {"ICT_MIN_RR": "2.0"}, level_strategies),
+        ("ICT_MIN_RR=3.0", {"ICT_MIN_RR": "3.0"}, level_strategies),
+        ("ICT_STOP_REF=leglow", {"ICT_STOP_REF": "leglow"}, level_strategies),
+        ("ICT_STOP_FLOOR_ATR=1.0", {"ICT_STOP_FLOOR_ATR": "1.0"}, level_strategies),
+        ("ICT_STOP_FLOOR_ATR=2.0", {"ICT_STOP_FLOOR_ATR": "2.0"}, level_strategies),
         ("REGIME_PERIOD=400", {"REGIME_PERIOD": "400"}, None),
         ("REGIME_PERIOD=800", {"REGIME_PERIOD": "800"}, None),
         ("BREAKOUT_EXIT_LOOKBACK=0", {"BREAKOUT_EXIT_LOOKBACK": "0"}, ["breakout"]),
@@ -256,7 +263,7 @@ def simulate(task):
     last_close_ms = None
 
     def finish(time_ms, fill, cause):
-        sign = 1.0 if position["side"] == "long" else -1.0
+        sign = 1.0 if position["side"] == signals.long else -1.0
         exit_fill = fill * (1.0 - sign * slippage)
         net = sign * (exit_fill / position["fill"] - 1.0) - 2.0 * fee
         risk = abs(position["fill"] - position["stop"]) / position["fill"]
@@ -279,7 +286,7 @@ def simulate(task):
                 if why:
                     refused[(decision.strategy, why)] += 1
                 else:
-                    sign = 1.0 if plan["side"] == "long" else -1.0
+                    sign = 1.0 if plan["side"] == signals.long else -1.0
                     position = dict(plan, strategy=decision.strategy, entry_ms=open_ms,
                                     fill=open_price * (1.0 + sign * slippage))
             elif kind == "exit" and position is not None:
@@ -289,7 +296,7 @@ def simulate(task):
 
         # 2. the exchange-side stop and target, stop first
         if position is not None:
-            long_side = position["side"] == "long"
+            long_side = position["side"] == signals.long
             stop, target = position["stop"], position["target"]
             hit = None
             if stop is not None and (low <= stop if long_side else high >= stop):
@@ -497,12 +504,13 @@ def main_():
         variants.extend(waves[args.wave])
 
     print("\nreplay %s to %s UTC, %d days, %d symbols, %s candles, fee %.3f%% + slippage "
-          "%.3f%% per fill" % (
+          "%.3f%% per fill, %.0f USDT notional at %dx" % (
               datetime.datetime.fromtimestamp(eval_start_ms / 1000, datetime.timezone.utc)
               .strftime("%Y-%m-%d %H:%M"),
               datetime.datetime.fromtimestamp(end_ms / 1000, datetime.timezone.utc)
               .strftime("%Y-%m-%d %H:%M"),
-              args.days, len(data), timeframe, 100 * args.fee, 100 * args.slippage))
+              args.days, len(data), timeframe, 100 * args.fee, 100 * args.slippage,
+              config.position_notional_usdt, config.leverage))
 
     pool = concurrent.futures.ProcessPoolExecutor(args.jobs) if args.jobs > 1 else None
     try:

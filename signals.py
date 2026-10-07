@@ -363,10 +363,11 @@ def regimeState(candles, side=long):
 def regimeBroken(candles):
     """(broken, sentence) - has the regime failed under an open position.
 
-    Used as an exit override that applies to every strategy, so a position
-    opened by any of them is closed when the reason to hold it at all is gone.
-    Read on the chart of the position's side, like regimeState. Controlled by
-    EXIT_ON_REGIME_BREAK.
+    Used as an exit override for every strategy whose exit is a rule, and for
+    a position whose owner is unknown, so it is closed when the reason to
+    hold it at all is gone. A strategy registered as brackets_only (ict,
+    pullback) is exempt; see exitSignal. Read on the chart of the position's
+    side, like regimeState. Controlled by EXIT_ON_REGIME_BREAK.
     """
     if not config.exit_on_regime_break or not config.regime_filter:
         return False, "regime-break exit off"
@@ -1096,12 +1097,15 @@ def breakoutExit(candles):
 
 # What each strategy is: its entry rule, its exit rule, and how many closed
 # candles it needs. Priority between strategies is not here; it is the order
-# of ACTIVE_STRATEGIES.
-Strategy = namedtuple("Strategy", "entry exit candles")
+# of ACTIVE_STRATEGIES. `brackets_only` marks a strategy whose position is
+# closed by its exchange-side stop and target alone: its stop sits where the
+# setup is wrong and its target was judged against it, so not even the
+# regime break overrides them.
+Strategy = namedtuple("Strategy", "entry exit candles brackets_only", defaults=(False,))
 
 strategies = {
-    "ict": Strategy(ictEntry, ictExit, ictCandles),
-    "pullback": Strategy(pullbackEntry, pullbackExit, pullbackCandles),
+    "ict": Strategy(ictEntry, ictExit, ictCandles, brackets_only=True),
+    "pullback": Strategy(pullbackEntry, pullbackExit, pullbackCandles, brackets_only=True),
     "trend": Strategy(trendEntry, trendExit, trendCandles),
     "breakout": Strategy(breakoutEntry, breakoutExit, breakoutCandles),
 }
@@ -1178,6 +1182,12 @@ def sidesFor(name):
 def shortStrategies():
     """The live strategies that may open a short, in priority order."""
     return [name for name in activeStrategies() if short in sidesFor(name)]
+
+
+def sideCanOpen(side):
+    """Whether any live strategy may open a position on `side`: a long
+    whenever one is live, a short only when one is named in SHORT_STRATEGIES."""
+    return bool(shortStrategies() if side == short else activeStrategies())
 
 
 def entryFor(name, bars, side):
@@ -1320,15 +1330,20 @@ def exitSignal(symbol, candles_by_timeframe, owner=None, side=long):
     live = activeStrategies()
     known_owner = owner in strategies and (config.strategy != multi or owner in live)
 
-    # The regime break applies to every position regardless of owner, and is
-    # judged on the timeframe of the owner so a scalp is not held open by an
-    # eight-day view it never traded on.
+    # The regime break applies to every position but one whose recorded owner
+    # closes by its brackets alone - live or not, its bracket on the exchange
+    # is still that strategy's. It is judged on the timeframe of the owner so
+    # a 15-minute trade is not held open by an hourly view it never traded on.
     judge = owner if known_owner else (live[0] if live else config.strategy)
     bars = barsFor(judge, candles_by_timeframe, config.exit_timeframe)
-    broken, regime_reason = regimeBroken(oriented(bars, side))
-    regime_reason = words(regime_reason, side)
-    if broken:
-        return Decision(close, regime_reason, owner, side=side)
+    if owner in strategies and strategies[owner].brackets_only:
+        regime_reason = ("no regime-break exit for %s, left to the exchange-side stop and "
+                         "target" % owner)
+    else:
+        broken, regime_reason = regimeBroken(oriented(bars, side))
+        regime_reason = words(regime_reason, side)
+        if broken:
+            return Decision(close, regime_reason, owner, side=side)
 
     if known_owner:
         decision = exitFor(owner, bars, side)

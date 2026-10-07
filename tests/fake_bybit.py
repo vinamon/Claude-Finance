@@ -345,6 +345,13 @@ def breakingDown(close=2000.0, half_range=10.0):
     return bars
 
 
+def breakingUp():
+    """breakingDown() reflected around 4000: flat candles whose newest closed
+    bar closes at 2015, above the 20-bar high, ATR exactly 20 - the breakout
+    long entry."""
+    return reflected(breakingDown())
+
+
 def heldPosition(symbol="ETH/USDT:USDT", contracts=0.22, side="long"):
     """One row of ccxt's fetch_positions for a position Bybit holds."""
     return {"symbol": symbol, "contracts": contracts, "side": side,
@@ -375,7 +382,8 @@ class FakeBybit:
     newest candle. `ticker`, when given, is returned whole instead, for a
     ticker that carries no usable price at all. `orders` maps an order id to
     the row Bybit's order history returns for it, and `order_history_error`,
-    when set, is raised by every order-history request instead. `tick` and
+    when set, is raised by every order-history request instead. Every candle
+    request is recorded in `ohlcv_requests`. `tick` and
     `qty_step` are every market's instrument filters; the defaults suit an
     ETH-sized price, a coin priced in cents needs a finer tick.
     """
@@ -398,6 +406,7 @@ class FakeBybit:
         self.trading_stops = []
         self.closed_requests = []
         self.order_history_requests = []
+        self.ohlcv_requests = []
 
     def load_markets(self):
         return self.markets
@@ -413,6 +422,7 @@ class FakeBybit:
                 if not symbols or position.get("symbol") in symbols]
 
     def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params=None):
+        self.ohlcv_requests.append({"symbol": symbol, "timeframe": timeframe, "limit": limit})
         return self.bars[-limit:] if limit else list(self.bars)
 
     def fetch_ticker(self, symbol, params=None):

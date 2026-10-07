@@ -324,8 +324,8 @@ def planEntry(spec, side, setup, price, atr_value=None):
     stop roughly at the current price.
 
     A short is the long mirrored: the stop sits above the price and rounds UP,
-    the target below and rounds DOWN, so the stop is never closer than asked
-    and the target never further.
+    the target below and rounds DOWN. On either side both levels round away
+    from the price, so neither is ever closer to it than asked.
     """
     if setup is not None:
         return planLevels(spec, side, setup, price, atr_value)

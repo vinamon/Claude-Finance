@@ -430,11 +430,16 @@ def handleHeld(client, symbol, position, owners):
     log("%s: holding %s %s contracts, opened by %s, checking its exit rule"
         % (symbol, side, size, owner or "an unknown rule"))
 
-    # The entry rules are read too, below, so one request per timeframe
-    # serves both questions.
+    # A setup for the other side is read below only when that side can open,
+    # and then one request per timeframe serves both questions. In dummy mode
+    # the entry rules ignore the market and --force-entry forces an "enter"
+    # that is no setup at all, so there is nothing to read.
+    opposite = signals.short if side == signals.long else signals.long
+    read_opposite = not config.dummy_mode and signals.sideCanOpen(opposite)
     wanted = signals.exitTimeframes(owner)
-    for timeframe, limit in signals.requiredTimeframes().items():
-        wanted[timeframe] = max(wanted.get(timeframe, 0), limit)
+    if read_opposite:
+        for timeframe, limit in signals.requiredTimeframes().items():
+            wanted[timeframe] = max(wanted.get(timeframe, 0), limit)
     candles = fetchCandles(client, symbol, wanted)
     decision = signals.exitSignal(symbol, candles, owner, side)
 
@@ -453,7 +458,7 @@ def handleHeld(client, symbol, position, owners):
     # One position per symbol, so a setup for the other side is never acted
     # on: the bot does not flip or fight its own position. It is logged so
     # the strategy can still be judged on what it saw.
-    if not config.dummy_mode:
+    if read_opposite:
         setup = signals.entrySignal(symbol, candles)
         if setup.action == signals.enter and setup.side != side:
             log("%s: holding %s, %s setup ignored - %s"
