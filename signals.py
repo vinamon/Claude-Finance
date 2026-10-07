@@ -529,20 +529,24 @@ def bullishGaps(candles, first, last, atr_values, min_atr, displacement_atr):
     return found
 
 
-def gapRetest(candles, gap, close_min, max_age, window):
+def gapRetest(candles, gap, move_end, close_min, max_age, window):
     """(bar, None) for the retest that triggers an entry, or (None, why not).
 
-    The retest is the FIRST bar after candle 3 whose low reaches the gap's
-    top - one touch, not the best of several. It triggers when it is among the
-    last `window` closed bars, no later than `max_age` bars after candle 3,
-    and closes at or above bottom + `close_min` of the gap. A close below the
-    bottom by any bar up to the newest kills the gap.
+    The retest is the FIRST bar after both candle 3 and `move_end` - the bar
+    the move that left the gap ended on - whose low reaches the gap's top: one
+    touch, not the best of several. A bar at or before `move_end` is part of
+    the move, not a return to the gap, so it neither triggers nor uses up the
+    touch. The retest triggers when it is among the last `window` closed bars,
+    no later than `max_age` bars after candle 3, and closes at or above
+    bottom + `close_min` of the gap. A close below the bottom by any bar from
+    candle 3 up to the newest kills the gap.
     """
     newest = len(candles) - 1
     for k in range(gap.c3 + 1, newest + 1):
         if candles[k][4] < gap.bottom:
             return None, "a candle closed below the gap %d bar(s) ago" % (newest - k)
-    touch = next((k for k in range(gap.c3 + 1, newest + 1) if candles[k][3] <= gap.top), None)
+    touch = next((k for k in range(max(gap.c3, move_end) + 1, newest + 1)
+                  if candles[k][3] <= gap.top), None)
     if touch is None:
         return None, "no retest of the gap yet"
     if touch > gap.c3 + max_age:
@@ -635,12 +639,12 @@ def structureShift(candles, swing_highs, sweep, max_bars, bars):
     return None
 
 
-def retestedGap(name, candles, gap):
+def retestedGap(name, candles, gap, move_end):
     """(bar, None) for the retest of the gap that triggers an entry, or (None,
-    the hold Decision saying why not): the first touch inside the signal
-    window and the age limit, closing in the upper part of the gap, on a bar
-    that opened inside the kill zones."""
-    retest, why = gapRetest(candles, gap, config.ict_entry_close_min,
+    the hold Decision saying why not): the first touch after `move_end`, inside
+    the signal window and the age limit, closing in the upper part of the gap,
+    on a bar that opened inside the kill zones."""
+    retest, why = gapRetest(candles, gap, move_end, config.ict_entry_close_min,
                             config.ict_fvg_max_age_bars, config.signal_lookback_bars)
     if retest is None:
         return None, Decision(hold, "%s: gap %.6f-%.6f: %s" % (name, gap.bottom, gap.top, why),
@@ -721,7 +725,7 @@ def ictEntry(candles):
                            config.ict_displacement_min_atr), "ict")
     gap = max(gaps, key=lambda found: found.top)
 
-    retest, held = retestedGap("ict", candles, gap)
+    retest, held = retestedGap("ict", candles, gap, m)
     if retest is None:
         return held
 
@@ -858,7 +862,7 @@ def pullbackEntry(candles):
                            config.pullback_displacement_min_atr), "pullback")
     gap = max(gaps, key=lambda found: found.top)
 
-    retest, held = retestedGap("pullback", candles, gap)
+    retest, held = retestedGap("pullback", candles, gap, leg.break_bar)
     if retest is None:
         return held
 

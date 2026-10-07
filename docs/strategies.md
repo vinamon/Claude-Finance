@@ -101,11 +101,14 @@ ATR(`ATR_PERIOD=14`) on the same candles. Tag `i` in the order id.
   It must be at least `ICT_FVG_MIN_ATR=0.1` ATR, and candle 2 must close up
   with a body of at least `ICT_DISPLACEMENT_MIN_ATR=1.0` ATR, both with the
   ATR at candle 3. Of several, the one with the highest top.
-- **Retest.** The first bar after candle 3 whose low reaches the top. It
-  triggers only if it is among the last `SIGNAL_LOOKBACK_BARS=3` bars, no more
-  than `ICT_FVG_MAX_AGE_BARS=12` after candle 3, and closes at or above
+- **Retest.** The first bar after both candle 3 and `m` whose low reaches the
+  top: the retest follows the move. A bar at or before `m` is no touch; it
+  neither triggers an entry nor uses up the one touch. The retest triggers
+  only if it is among the last `SIGNAL_LOOKBACK_BARS=3` bars, no more than
+  `ICT_FVG_MAX_AGE_BARS=12` after candle 3, and closes at or above
   `bottom + ICT_ENTRY_CLOSE_MIN=0.5` × the gap. No bar from candle 3 to the
-  newest may close under the bottom. A failed first touch is not retried.
+  newest may close under the bottom. A failed first touch after `m`, or one
+  outside the window or the age limit, is not retried: the gap is dead.
 - **Kill zones.** `ICT_KILL_ZONES=off`. When set ("HH:MM-HH:MM,..." on the
   `ICT_KILL_ZONE_TZ=America/New_York` clock), the retest bar must open inside
   one. Needs the `tzdata` package on Windows.
@@ -147,8 +150,10 @@ are ict's, with the same `ICT_` settings. Only the leg search below and
 - **Fair-value gap.** As for ict, with candle 2 in `[LL, b]` and a body of at
   least `PULLBACK_DISPLACEMENT_MIN_ATR=1.5` ATR (ict asks 1.0). The gap is at
   least `ICT_FVG_MIN_ATR=0.1` ATR; of several, the one with the highest top.
-- **Retest, kill zones, live price.** As for ict, in the same order, from the
-  gap's third candle.
+- **Retest, kill zones, live price.** As for ict, in the same order, with `b`
+  in place of `m`: the retest is the first touch after both the gap's third
+  candle and the break. A touch at or before `b` neither triggers nor uses up
+  the touch.
 - **Stop.** As for ict, with `LL` playing the part of the sweep low:
   `ICT_STOP_REF=candle1` is candle 1's low, `leglow` is `LL`'s low; either way
   also under every low from candle 3 to the retest.

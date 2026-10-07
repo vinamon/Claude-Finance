@@ -14,8 +14,10 @@ Run from the repository root, with the project virtualenv active:
 import time
 import unittest
 
-from fake_bybit import (FakeBybit, breakingDown, candles, heldPosition, ictLong, ictShort,
-                        pullbackLong, risingRun, runCycle, series, trendDown, trendUp)
+from fake_bybit import (FakeBybit, breakingDown, candles, heldPosition, ictLong,
+                        ictLongGapBeforeShift, ictShort, pullbackLong,
+                        pullbackLongGapBeforeBreak, risingRun, runCycle, series, trendDown,
+                        trendUp)
 
 # 3 ATR stop, 6 ATR target, and leverage low enough that the liquidation cap
 # (half of 1/5 of the price, 200 at 2000) stays out of the way of a 60 stop.
@@ -412,6 +414,23 @@ class IctLong(unittest.TestCase):
             self.assertIn("ict exit: none, left to the exchange-side stop and target",
                           cycle.output)
 
+    def testATouchOfTheGapBeforeTheStructureShiftIsNotTheRetest(self):
+        # The gap 1990-1996 is left before the shift. A touch before the shift
+        # closing under the midpoint, read as the one touch, would kill it;
+        # the retest after the shift buys. Its 15 body is about 1 ATR, so the
+        # displacement asked is lowered to let the gap stand.
+        client = FakeBybit(bars=ictLongGapBeforeShift())
+
+        cycle = runCycle(client, ict_displacement_min_atr=0.5, **ict)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        order = client.created_orders[0]
+        self.assertEqual(order["side"], "buy")
+        self.assertIn("-i-", order["params"]["orderLinkId"])
+        self.assertIn("first retest of the gap 1990.000000-1996.000000 closed at 1999.000000 "
+                      "0 bar(s) ago", openedPushes(cycle)[0]["message"])
+
     def testABadKillZoneIsRefused(self):
         cycle = runCycle(FakeBybit(bars=ictLong()), ict_kill_zones="9-11", **ict)
 
@@ -496,6 +515,23 @@ class PullbackLong(unittest.TestCase):
         self.assertEqual(cycle.exit_code, 0, cycle.output)
         self.assertEqual(client.created_orders, [], cycle.output)
         self.assertIn("no gap of", cycle.output)
+
+    def testATouchOfTheGapBeforeTheBreakIsNotTheRetest(self):
+        # The gap 2012-2024 is left before the break. A touch before the break
+        # closing under the midpoint, read as the one touch, would kill it;
+        # the retest after the break buys. Its 22 body is under 1.5 ATR, so
+        # the displacement asked is lowered to let the gap stand.
+        client = FakeBybit(bars=pullbackLongGapBeforeBreak())
+
+        cycle = runCycle(client, pullback_displacement_min_atr=1.0, **pullback)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        order = client.created_orders[0]
+        self.assertEqual(order["side"], "buy")
+        self.assertIn("-p-", order["params"]["orderLinkId"])
+        self.assertIn("first retest of the gap 2012.000000-2024.000000 closed at 2026.000000 "
+                      "0 bar(s) ago", openedPushes(cycle)[0]["message"])
 
     def testABadDisplacementIsRefused(self):
         cycle = runCycle(FakeBybit(bars=pullbackLong()), pullback_displacement_min_atr=-1.0,

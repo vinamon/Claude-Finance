@@ -155,18 +155,10 @@ def ramp(start, step, count, wick):
     return bars
 
 
-def ictLong():
-    """Candles forming one ict long, newest closed bar the retest, at 09:45 in
-    New York.
-
-    A slow climb (the regime line stays under the price), a run up to a swing
-    high at 2100 and back down, a swing low at 1980, a swing high at 2005, then:
-    a sweep to 1975 that closes back above 1980, a candle 2 closing at 2022
-    above 2005 (the structure shift) and leaving the gap 1990-2010 between
-    candle 1's high and candle 3's low, one bar away, and the first retest:
-    low 2006, close 2014. Candle 1's low, 1978, is the structure; 2100 is the
-    only untouched buy-side level above, the draw. ATR is about 14.
-    """
+def ictLead():
+    """The bars of ictLong() up to and including candle 1: the climb, the draw
+    at 2100, the swing low 1980, the swing high 2005, the sweep to 1975 and
+    candle 1 (high 1990, low 1978)."""
     bars = risingRun(300, 2000.0, 0.6, 4.0)
     bars += ramp(2000.0, 3.0, 30, 2.0)                  # up to 2090
     bars += [(2090, 2100, 2088, 2093)]                  # the swing high, the draw
@@ -181,6 +173,44 @@ def ictLong():
         (1992, 1996, 1983, 1986),
         (1986, 1990, 1975, 1984),                       # the sweep
         (1984, 1990, 1978, 1988),                       # candle 1
+    ]
+    return bars
+
+
+def ictLongGapBeforeShift():
+    """An ict long whose gap is left before the structure shift, newest closed
+    bar the retest.
+
+    ictLead(), then a candle 2 closing at 2003, still under the swing high
+    2005, and candle 3: the gap 1990-1996. The next bar touches it and closes
+    at 1992, under its midpoint of 1993 - a failed first touch, if it counted.
+    It is before the shift, so it does not. The shift is the bar after, closing
+    at 2010 with a low of 1991 (a touch on the shift bar itself, which does not
+    count either), and the bar after that is the retest: low 1995, close 1999.
+    """
+    bars = ictLead() + [
+        (1988, 2004, 1987, 2003),                       # candle 2, under 2005
+        (2003, 2004, 1996, 2001),                       # candle 3
+        (2001, 2003, 1994, 1992),                       # a touch before the shift
+        (1992, 2012, 1991, 2010),                       # the structure shift
+        (2010, 2012, 1995, 1999),                       # the retest
+    ]
+    return series(bars)
+
+
+def ictLong():
+    """Candles forming one ict long, newest closed bar the retest, at 09:45 in
+    New York.
+
+    A slow climb (the regime line stays under the price), a run up to a swing
+    high at 2100 and back down, a swing low at 1980, a swing high at 2005, then:
+    a sweep to 1975 that closes back above 1980, a candle 2 closing at 2022
+    above 2005 (the structure shift) and leaving the gap 1990-2010 between
+    candle 1's high and candle 3's low, one bar away, and the first retest:
+    low 2006, close 2014. Candle 1's low, 1978, is the structure; 2100 is the
+    only untouched buy-side level above, the draw. ATR is about 14.
+    """
+    bars = ictLead() + [
         (1988, 2025, 1987, 2022),                       # candle 2, the structure shift
         (2022, 2030, 2010, 2026),                       # candle 3
         (2026, 2032, 2018, 2024),
@@ -189,18 +219,10 @@ def ictLong():
     return series(bars)
 
 
-def pullbackLong(leg_low=1996.0, draw=None):
-    """Candles forming one pullback long, newest closed bar the retest, at
-    09:45 in New York.
-
-    The same slow climb, then a swing low at 1980, a swing high H at 2040, a
-    leg low at `leg_low` (1996: above the 1980) and one big candle, 2010 to
-    2046, that closes above H and leaves the gap 2012-2024 between candle 1's
-    high and candle 3's low. The first retest: low 2022, close 2026. Candle 1's
-    low, 1998, is the structure. Nothing untouched stands above the price, so
-    the target is the fallback multiple of the risk. ATR is about 14. `draw`
-    puts one more swing high, untouched since, into the climb at that price.
-    """
+def pullbackLead(leg_low=1996.0, draw=None):
+    """The bars of pullbackLong() up to and including candle 1: the climb, the
+    swing low 1980, the swing high H 2040, the leg low and candle 1 (high
+    2012, low 1998)."""
     bars = risingRun(300, 2000.0, 0.6, 4.0)
     if draw is not None:
         o, h, l, c = bars[240]
@@ -218,9 +240,47 @@ def pullbackLong(leg_low=1996.0, draw=None):
         (2020, 2024, 2008, 2012),
         (2012, 2016, leg_low, leg_low + 6),             # the leg low
         (leg_low + 6, 2012, 1998, 2010),                # candle 1
+    ]
+    return bars
+
+
+def pullbackLong(leg_low=1996.0, draw=None):
+    """Candles forming one pullback long, newest closed bar the retest, at
+    09:45 in New York.
+
+    The same slow climb, then a swing low at 1980, a swing high H at 2040, a
+    leg low at `leg_low` (1996: above the 1980) and one big candle, 2010 to
+    2046, that closes above H and leaves the gap 2012-2024 between candle 1's
+    high and candle 3's low. The first retest: low 2022, close 2026. Candle 1's
+    low, 1998, is the structure. Nothing untouched stands above the price, so
+    the target is the fallback multiple of the risk. ATR is about 14. `draw`
+    puts one more swing high, untouched since, into the climb at that price.
+    """
+    bars = pullbackLead(leg_low, draw) + [
         (2010, 2050, 2008, 2046),                       # candle 2, closes above H
         (2046, 2062, 2024, 2058),                       # candle 3
         (2058, 2060, 2022, 2026),                       # the retest
+    ]
+    return series(bars)
+
+
+def pullbackLongGapBeforeBreak():
+    """A pullback long whose gap is left before the break, newest closed bar
+    the retest.
+
+    pullbackLead(), then a candle 2 closing at 2032, still under H 2040, and
+    candle 3: the gap 2012-2024. The next bar touches it and closes at 2016,
+    under its midpoint of 2018 - a failed first touch, if it counted. It is
+    before the break, so it does not. The break is the bar after, closing at
+    2044 with a low of 2015 (a touch on the break bar itself, which does not
+    count either), and the bar after that is the retest: low 2022, close 2026.
+    """
+    bars = pullbackLead() + [
+        (2010, 2034, 2008, 2032),                       # candle 2, under H
+        (2032, 2038, 2024, 2030),                       # candle 3
+        (2030, 2032, 2020, 2016),                       # a touch before the break
+        (2016, 2048, 2015, 2044),                       # the break
+        (2044, 2046, 2022, 2026),                       # the retest
     ]
     return series(bars)
 

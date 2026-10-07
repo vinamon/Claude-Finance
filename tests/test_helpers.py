@@ -318,9 +318,11 @@ class GapFinder(unittest.TestCase):
 class Retest(unittest.TestCase):
     gap = signals.Gap(1, 2, 3, 100.0, 104.0)
 
-    def retest(self, *later, window=3, max_age=12):
+    def retest(self, *later, window=3, max_age=12, move_end=3):
+        # `move_end` is the bar the move that left the gap ended on: the structure
+        # shift for ict, the break for pullback. By default candle 3 itself.
         return signals.gapRetest(gapRows()[:4] + [bar(*row) for row in later], self.gap,
-                                 0.5, max_age, window)
+                                 move_end, 0.5, max_age, window)
 
     def testTheFirstTouchOfTheTopThatClosesAboveTheMidpointTriggers(self):
         self.assertEqual(self.retest((117, 120, 110, 119), (119, 119, 103, 102)), (5, None))
@@ -350,6 +352,27 @@ class Retest(unittest.TestCase):
 
     def testNoTouchYetIsNoRetest(self):
         self.assertEqual(self.retest((117, 120, 110, 119)), (None, "no retest of the gap yet"))
+
+    def testATouchAtOrBeforeTheEndOfTheMoveIsNotARetest(self):
+        # The move ends on bar 5. Bars 4 and 5 both touch and close above the
+        # midpoint, but the retest must follow the move: bar 6 is the first.
+        early = ((117, 118, 103, 104), (104, 108, 103.5, 107))
+        self.assertEqual(self.retest(*early, move_end=5), (None, "no retest of the gap yet"))
+        self.assertEqual(self.retest(*early, (107, 109, 103, 106), move_end=5), (6, None))
+
+    def testATouchBeforeTheEndOfTheMoveDoesNotUseUpTheOneTouch(self):
+        # Bar 4 touches and closes under the midpoint of 102; read as the
+        # first touch it would kill the gap. Before the move it is no touch.
+        self.assertEqual(self.retest((117, 118, 101, 101.5), (101.5, 112, 105, 110),
+                                     (110, 111, 103, 105), move_end=5), (6, None))
+
+    def testTheFirstTouchAfterTheMoveIsStillTheOnlyOne(self):
+        # The move ends on bar 4; bar 5 touches and closes under the midpoint,
+        # so bar 6's good close is a second touch.
+        index, why = self.retest((117, 120, 110, 119), (119, 120, 101, 101.5),
+                                 (101.5, 106, 101, 105), move_end=4)
+        self.assertIsNone(index)
+        self.assertIn("under 102.000000", why)
 
 
 def hlc(*rows):
