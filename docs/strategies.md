@@ -63,7 +63,9 @@ not closed when price falls back below the line.
   `BREAKOUT_LOOKBACK=20` bars, within the lookback window. The breaking bar
   is not part of its own level.
 - **Exit:** a close below the lowest low of the previous
-  `BREAKOUT_EXIT_LOOKBACK=10` bars.
+  `BREAKOUT_EXIT_LOOKBACK=10` bars. `BREAKOUT_EXIT_LOOKBACK=0` means no rule
+  exit at all: the position is left to its exchange-side stop and target. The
+  replay tests that variant next to 10 and 20 (wave 1).
 - **Why the asymmetry:** it is the original Turtle rule. A symmetric exit
   gives back most of the move before admitting the trend is over.
 

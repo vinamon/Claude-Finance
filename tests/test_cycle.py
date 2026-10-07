@@ -265,6 +265,58 @@ class HeldShort(unittest.TestCase):
         self.assertEqual([order["side"] for order in client.created_orders], ["buy"], cycle.output)
 
 
+class BreakoutWithoutARuleExit(unittest.TestCase):
+    def testLookbackZeroLeavesAHeldPositionToItsExchangeStopAndTarget(self):
+        # The same bars close the position under the default lookback of 10
+        # (see UnknownOwner above); 0 means "no rule exit" and used to crash
+        # the cycle on an empty slice.
+        client = FakeBybit(bars=breakingLow(), positions=[heldPosition()])
+
+        cycle = runCycle(client, active_strategies=["breakout"], unknown_owner_exit="any",
+                         breakout_exit_lookback=0)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertNotIn("Traceback", cycle.output)
+
+    def testLookbackZeroLeavesAHeldShortToItsExchangeStopAndTarget(self):
+        # The mirrored exit path reads the same "off" switch: these bars
+        # close a short under the default lookback (see HeldShort above).
+        client = FakeBybit(bars=breakingHigh(), positions=[heldPosition(side="short")])
+
+        cycle = runCycle(client, active_strategies=["breakout"], unknown_owner_exit="any",
+                         breakout_exit_lookback=0)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertNotIn("Traceback", cycle.output)
+
+    def testLookbackZeroIsNotWarnedAbout(self):
+        cycle = runCycle(FakeBybit(), breakout_exit_lookback=0)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertNotIn("CONFIG WARNING", cycle.output)
+
+    def testANegativeExitLookbackIsRefused(self):
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, force_entry=True, breakout_exit_lookback=-1, **risk)
+
+        self.assertEqual(cycle.exit_code, 1, cycle.output)
+        self.assertIn("CONFIG ERROR: BREAKOUT_EXIT_LOOKBACK must be >= 0", cycle.output)
+        self.assertEqual(client.created_orders, [])
+
+    def testAnEntryLookbackBelowOneIsRefused(self):
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, force_entry=True, breakout_lookback=0, breakout_exit_lookback=0,
+                         **risk)
+
+        self.assertEqual(cycle.exit_code, 1, cycle.output)
+        self.assertIn("CONFIG ERROR: BREAKOUT_LOOKBACK must be >= 1", cycle.output)
+        self.assertEqual(client.created_orders, [])
+
+
 class ClosedPositionReport(unittest.TestCase):
     def testACloseIsLoggedAndPushedFromOneReadOfTheCloseHistory(self):
         client = FakeBybit(closed=[closedRecord()], orders={"close-1": stopLossOrder()})

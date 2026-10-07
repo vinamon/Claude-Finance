@@ -357,6 +357,8 @@ adx_min = envFloat("ADX_MIN", 20.0)
 # Enter on a close above the N-bar high, leave on a close below the M-bar low,
 # M shorter than N. The asymmetry is the original Turtle rule: a symmetric
 # channel gives back most of a move before admitting the trend is over.
+# An exit lookback of 0 means no rule exit: the exchange-side stop and target
+# alone close the trade.
 breakout_lookback = envInt("BREAKOUT_LOOKBACK", 20)
 breakout_exit_lookback = envInt("BREAKOUT_EXIT_LOOKBACK", 10)
 
@@ -534,7 +536,7 @@ def warnings():
     for name, replacement in sorted(retired_settings.items()):
         if os.environ.get(name):
             notes.append("%s is set but no longer used - %s" % (name, replacement))
-    if breakout_exit_lookback > breakout_lookback:
+    if breakout_exit_lookback > 0 and breakout_exit_lookback > breakout_lookback:
         notes.append(
             "BREAKOUT_EXIT_LOOKBACK (%d) is longer than BREAKOUT_LOOKBACK (%d), so the "
             "exit channel is wider than the entry channel and the trade gives back most "
@@ -638,6 +640,10 @@ def validate():
         problems.append("ADX_MIN must be >= 0 (0 disables the filter)")
     if signal_lookback_bars < 1:
         problems.append("SIGNAL_LOOKBACK_BARS must be >= 1")
+    if breakout_lookback < 1:
+        problems.append("BREAKOUT_LOOKBACK must be >= 1")
+    if breakout_exit_lookback < 0:
+        problems.append("BREAKOUT_EXIT_LOOKBACK must be >= 0 (0 means no rule exit)")
     for name in strategy_timeframes:
         if name not in known:
             problems.append(

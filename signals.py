@@ -501,7 +501,9 @@ def trendExit(candles):
 # symmetric channel gives back most of a move before admitting it is over,
 # because by the time price makes a new N-bar low the trend has been dead for
 # a long time. BREAKOUT_LOOKBACK sets the entry channel,
-# BREAKOUT_EXIT_LOOKBACK the (shorter) exit channel.
+# BREAKOUT_EXIT_LOOKBACK the (shorter) exit channel. An exit lookback of 0
+# switches the rule exit off: the position is left to its exchange-side stop
+# and target.
 # ---------------------------------------------------------------------------
 
 
@@ -547,6 +549,11 @@ def breakoutCandles():
 
 def breakoutExit(candles):
     window = config.breakout_exit_lookback
+    if window == 0:
+        return Decision(
+            hold, "breakout exit: off (BREAKOUT_EXIT_LOOKBACK=0), left to the stop and target",
+            "breakout",
+        )
     need = window + 2
     if len(candles) < need:
         return Decision(

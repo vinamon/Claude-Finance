@@ -78,6 +78,7 @@ waves = {
     "1": [
         ("REGIME_PERIOD=400", {"REGIME_PERIOD": "400"}, None),
         ("REGIME_PERIOD=800", {"REGIME_PERIOD": "800"}, None),
+        ("BREAKOUT_EXIT_LOOKBACK=0", {"BREAKOUT_EXIT_LOOKBACK": "0"}, ["breakout"]),
         ("BREAKOUT_EXIT_LOOKBACK=20", {"BREAKOUT_EXIT_LOOKBACK": "20"}, ["breakout"]),
     ],
 }
