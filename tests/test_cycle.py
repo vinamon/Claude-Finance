@@ -1123,6 +1123,14 @@ class ShortLog(unittest.TestCase):
 
 
 class ConfigurationWarnings(unittest.TestCase):
+    def testAMissingNtfyTopicIsWarnedAbout(self):
+        # runCycle pins a topic, so the warning shows only when a test asks
+        # for it with an empty one.
+        cycle = runCycle(FakeBybit(), ntfy_topic="")
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertIn("WARNING: NTFY_TOPIC is not set", cycle.output)
+
     def testMixedClocksWithoutPerStrategyCapsAreWarnedAbout(self):
         # A 15-minute rule fires far more often than an hourly one and takes
         # every slot first unless the strategies are budgeted separately.

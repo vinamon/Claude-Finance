@@ -33,6 +33,10 @@ scratch = tempfile.TemporaryDirectory(prefix="claude-finance-tests-")
 baseline = {
     "bybit_api_key": "harness",
     "bybit_api_secret": "harness",
+    # Set, so a laptop with no NTFY_TOPIC does not print the "not set" warning
+    # into every cycle; pushes never leave the process (see recordPush). A test
+    # about that warning passes ntfy_topic="".
+    "ntfy_topic": "harness-topic",
     "category": "linear",
     "position_idx": 0,
     "order_link_prefix": "cf",
