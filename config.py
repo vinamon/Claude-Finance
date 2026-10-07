@@ -112,6 +112,27 @@ def envMap(name, default, cast=str):
     return parsed
 
 
+def parseKillZones(text):
+    """"HH:MM-HH:MM,HH:MM-HH:MM" as [(start, end)] in minutes of the day, or
+    None for "off". A window whose end is earlier than its start runs past
+    midnight. Raises ValueError on anything else; validate() reports it."""
+    if (text or "").strip().lower() == "off":
+        return None
+    windows = []
+    for item in text.split(","):
+        start, _, end = item.strip().partition("-")
+        minutes = []
+        for clock in (start, end):
+            hours, _, mins = clock.strip().partition(":")
+            if not (hours.isdigit() and mins.isdigit()) or int(hours) > 23 or int(mins) > 59:
+                raise ValueError("%r is not HH:MM-HH:MM" % item.strip())
+            minutes.append(int(hours) * 60 + int(mins))
+        if minutes[0] == minutes[1]:
+            raise ValueError("%r is an empty window" % item.strip())
+        windows.append(tuple(minutes))
+    return windows
+
+
 # ---------------------------------------------------------------------------
 # secrets - never hardcode, never log
 # ---------------------------------------------------------------------------
@@ -205,7 +226,7 @@ symbols = envList(
 
 # Every strategy the bot has, in the order the documentation lists them. A
 # name outside this list is refused by validate().
-strategy_names = ("trend", "breakout")
+strategy_names = ("ict", "trend", "breakout")
 
 # One of strategy_names, or "multi" to run several at once.
 strategy = envStr("STRATEGY", "multi")
@@ -361,6 +382,79 @@ adx_min = envFloat("ADX_MIN", 20.0)
 # alone close the trade.
 breakout_lookback = envInt("BREAKOUT_LOOKBACK", 20)
 breakout_exit_lookback = envInt("BREAKOUT_EXIT_LOOKBACK", 10)
+
+# ---------------------------------------------------------------------------
+# ict - sweep, structure shift, fair-value gap retest
+#
+# The trader agent's rules (issue #15, "Strategy rules"). Every count is in
+# candles of the strategy's timeframe, every size in ATR on that timeframe.
+# ---------------------------------------------------------------------------
+
+# A swing high is a high strictly above this many bars on each side, a swing
+# low the mirror. It is known only once the bars after it have closed.
+ict_swing_bars = envInt("ICT_SWING_BARS", 2)
+
+# How far back a swing low counts as liquidity worth sweeping: 96 bars is one
+# day of 15-minute candles. The previous UTC day's low counts as well.
+ict_liquidity_lookback_bars = envInt("ICT_LIQUIDITY_LOOKBACK_BARS", 96)
+
+# Bars after the sweeping candle within which a close must come back above the
+# swept level. 0 means the sweeping candle itself must close back above it.
+ict_sweep_reclaim_bars = envInt("ICT_SWEEP_RECLAIM_BARS", 1)
+
+# Bars after the sweep within which a close must break the last swing high,
+# the structure shift. 8 bars is two hours on 15-minute candles.
+ict_mss_max_bars = envInt("ICT_MSS_MAX_BARS", 8)
+
+# The gap's middle candle must close up with a body of at least this many ATR:
+# the move that made the gap was displacement, not drift.
+ict_displacement_min_atr = envFloat("ICT_DISPLACEMENT_MIN_ATR", 1.0)
+
+# The smallest gap worth trading, in ATR. A one-tick gap is smaller than the fee.
+ict_fvg_min_atr = envFloat("ICT_FVG_MIN_ATR", 0.1)
+
+# The retest must come within this many bars of the gap's third candle.
+ict_fvg_max_age_bars = envInt("ICT_FVG_MAX_AGE_BARS", 12)
+
+# The retest candle must close at or above bottom + this fraction of the gap:
+# 0.5 is the gap's midpoint.
+ict_entry_close_min = envFloat("ICT_ENTRY_CLOSE_MIN", 0.5)
+
+# The live price may sit at most this many ATR above the gap's top, and must
+# sit above its bottom. Further away the market order would not fill at the gap.
+ict_max_chase_atr = envFloat("ICT_MAX_CHASE_ATR", 0.5)
+
+# Hours the retest candle must open in, as "HH:MM-HH:MM,..." on the clock of
+# ICT_KILL_ZONE_TZ, or "off". Off by default: a session filter has to earn its
+# place in the replay before it removes trades. Needs the tzdata package on
+# Windows, which has no time zone database of its own.
+ict_kill_zones = envStr("ICT_KILL_ZONES", "off")
+ict_kill_zone_tz = envStr("ICT_KILL_ZONE_TZ", "America/New_York")
+
+# What the stop hides under: "candle1" is the gap's first candle's low,
+# "leglow" the lowest low of the move from the sweep to the structure shift.
+# Either way the stop also stays under every low from the gap's third candle
+# to the retest.
+ict_stop_ref = envStr("ICT_STOP_REF", "candle1")
+
+# The stop sits this many ATR under that reference...
+ict_stop_buffer_atr = envFloat("ICT_STOP_BUFFER_ATR", 0.1)
+
+# ...and at least this many ATR under the live price. A structure stop tighter
+# than that sits inside ordinary 15-minute noise, so it is widened, not refused.
+ict_stop_floor_atr = envFloat("ICT_STOP_FLOOR_ATR", 1.5)
+
+# When the liquidation cap pulls the stop above the structural stop, the stop
+# no longer sits where the setup is wrong, and the trade is refused. true takes
+# it with the capped stop instead.
+ict_allow_capped_stop = envBool("ICT_ALLOW_CAPPED_STOP", False)
+
+# The target is the nearest untouched buy-side level that existed before the
+# sweep. Closer than this many times the risk, the trade is refused: fees would
+# take most of the win. With no such level, the target is the fallback
+# multiple of the risk.
+ict_min_rr = envFloat("ICT_MIN_RR", 1.5)
+ict_fallback_target_r = envFloat("ICT_FALLBACK_TARGET_R", 2.0)
 
 # ---------------------------------------------------------------------------
 # risk model - where the stop, target and trail actually go
@@ -644,6 +738,7 @@ def validate():
         problems.append("BREAKOUT_LOOKBACK must be >= 1")
     if breakout_exit_lookback < 0:
         problems.append("BREAKOUT_EXIT_LOOKBACK must be >= 0 (0 means no rule exit)")
+    problems.extend(ictProblems())
     for name in strategy_timeframes:
         if name not in known:
             problems.append(
@@ -689,4 +784,50 @@ def validate():
             "risks more than it can win." % (atr_target_mult, atr_stop_mult)
         )
 
+    return problems
+
+
+def ictProblems():
+    """validate()'s checks for the ICT settings, which the level helpers of
+    every chart-reading strategy share."""
+    problems = []
+    at_least = [("ICT_SWING_BARS", ict_swing_bars, 1),
+                ("ICT_LIQUIDITY_LOOKBACK_BARS", ict_liquidity_lookback_bars, 1),
+                ("ICT_SWEEP_RECLAIM_BARS", ict_sweep_reclaim_bars, 0),
+                ("ICT_MSS_MAX_BARS", ict_mss_max_bars, 0),
+                ("ICT_FVG_MAX_AGE_BARS", ict_fvg_max_age_bars, 1),
+                ("ICT_DISPLACEMENT_MIN_ATR", ict_displacement_min_atr, 0),
+                ("ICT_FVG_MIN_ATR", ict_fvg_min_atr, 0),
+                ("ICT_MAX_CHASE_ATR", ict_max_chase_atr, 0),
+                ("ICT_STOP_BUFFER_ATR", ict_stop_buffer_atr, 0),
+                ("ICT_STOP_FLOOR_ATR", ict_stop_floor_atr, 0)]
+    for name, value, floor in at_least:
+        if value < floor:
+            problems.append("%s must be >= %s, got %s" % (name, floor, value))
+    if not 0 <= ict_entry_close_min <= 1:
+        problems.append("ICT_ENTRY_CLOSE_MIN must be between 0 and 1, got %s"
+                        % ict_entry_close_min)
+    if ict_min_rr <= 0:
+        problems.append("ICT_MIN_RR must be > 0, got %s" % ict_min_rr)
+    if ict_fallback_target_r <= 0:
+        problems.append("ICT_FALLBACK_TARGET_R must be > 0, got %s" % ict_fallback_target_r)
+    if ict_stop_ref not in ("candle1", "leglow"):
+        problems.append("ICT_STOP_REF must be 'candle1' or 'leglow', got %r" % ict_stop_ref)
+
+    try:
+        zones = parseKillZones(ict_kill_zones)
+    except ValueError as error:
+        problems.append("ICT_KILL_ZONES must be 'off' or HH:MM-HH:MM,... - %s" % error)
+        zones = None
+    if zones:
+        # Only with kill zones on: the time zone database is not needed
+        # otherwise, and Windows has none without the tzdata package.
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(ict_kill_zone_tz)
+        except Exception as error:
+            problems.append(
+                "ICT_KILL_ZONE_TZ %r cannot be loaded (%s). On Windows the time zone "
+                "database comes from the tzdata package: pip install -r requirements.txt"
+                % (ict_kill_zone_tz, error))
     return problems

@@ -27,8 +27,9 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 - **Exits are states.** An exit rule reads the current bar every cycle.
 - **Voting:** `STRATEGY=multi` with `MIN_ENTRY_VOTES=1`. Any one strategy
   saying "buy" opens the position.
-- **Live set:** `ACTIVE_STRATEGIES=breakout`. trend is described below but is
-  not trading: it had too few trades in the replay to judge. meanrev and scalp
+- **Live set:** `ACTIVE_STRATEGIES=breakout`. trend and ict are described
+  below but are not trading: trend had too few trades in the replay to judge,
+  and ict goes live with the rest of the rework (issue #15). meanrev and scalp
   lost money in the replay and were removed.
 - **Unknown owner:** `UNKNOWN_OWNER_EXIT=regime`. A position whose strategy
   is unknown or no longer active is left to its exchange-side stop and
@@ -45,6 +46,54 @@ That is about two days of 15-minute bars.
 
 The filter gates entries only. `EXIT_ON_REGIME_BREAK=false`: a position is
 not closed when price falls back below the line.
+
+## ict: sweep, structure shift, retest of the gap
+
+Long side. Every count is in closed 15-minute candles and every size in
+ATR(`ATR_PERIOD=14`) on the same candles. Tag `i` in the order id.
+
+- **Swings.** A swing high is a high strictly above the `ICT_SWING_BARS=2`
+  highs on each side; a swing low the mirror. It exists only once those bars
+  have closed.
+- **Sweep, at bar `s`.** A level `L` is taken: a swing low inside the last
+  `ICT_LIQUIDITY_LOOKBACK_BARS=96` bars before `s`, confirmed by bar `s−1`, or
+  the previous UTC day's low (counted only when that whole day is in the
+  window). `L` is untouched up to `s−1` (no low under it), `low[s] < L`, and a
+  bar from `s` to `s + ICT_SWEEP_RECLAIM_BARS=1` closes above `L`.
+- **Structure shift, at bar `m`.** The first bar from `s` to
+  `s + ICT_MSS_MAX_BARS=8` that closes above `H`, the latest swing high before
+  `s` that is confirmed by bar `m`. Only the most recent shift counts; two
+  sweeps that shift on the same bar are read from the first.
+- **Fair-value gap.** Candles 1, 2, 3 with candle 2 between `s` and `m`, and
+  `low[3] > high[1]`: the gap runs from `high[1]` (bottom) to `low[3]` (top).
+  It must be at least `ICT_FVG_MIN_ATR=0.1` ATR, and candle 2 must close up
+  with a body of at least `ICT_DISPLACEMENT_MIN_ATR=1.0` ATR, both with the
+  ATR at candle 3. Of several, the one with the highest top.
+- **Retest.** The first bar after candle 3 whose low reaches the top. It
+  triggers only if it is among the last `SIGNAL_LOOKBACK_BARS=3` bars, no more
+  than `ICT_FVG_MAX_AGE_BARS=12` after candle 3, and closes at or above
+  `bottom + ICT_ENTRY_CLOSE_MIN=0.5` × the gap. No bar from candle 3 to the
+  newest may close under the bottom. A failed first touch is not retried.
+- **Kill zones.** `ICT_KILL_ZONES=off`. When set ("HH:MM-HH:MM,..." on the
+  `ICT_KILL_ZONE_TZ=America/New_York` clock), the retest bar must open inside
+  one. Needs the `tzdata` package on Windows.
+- **Live price.** `bottom < live ≤ top + ICT_MAX_CHASE_ATR=0.5` × ATR, or no
+  trade (refusal "chase").
+- **Stop.** The reference is candle 1's low (`ICT_STOP_REF=candle1`; `leglow`
+  is the lowest low from `s` to `m`), or any lower low from candle 3 to the
+  retest. `structural = reference − ICT_STOP_BUFFER_ATR=0.1` × ATR, and the
+  stop is the lower of that and `live − ICT_STOP_FLOOR_ATR=1.5` × ATR. Then the
+  liquidation cap; if it pulls the stop above `structural`, no trade
+  (refusal "capped-stop", `ICT_ALLOW_CAPPED_STOP=false`). Then the shared
+  minimum-stop check.
+- **Target.** The nearest level above the live price among the swing highs
+  with index from `s − 96` to the last one confirmed by `s−1` that nothing has
+  traded above since, and the previous UTC day's high while untouched since
+  00:00 UTC. The target is that level. Closer than `ICT_MIN_RR=1.5` × risk: no
+  trade (refusal "reward-risk"). No such level: `ICT_FALLBACK_TARGET_R=2.0` ×
+  risk.
+- **Exit.** The exchange-side stop and target only. No trail, no rule exit.
+  The exit on a bearish structure shift is deferred.
 
 ## trend: EMA crossover confirmed by ADX
 
@@ -79,8 +128,9 @@ is not running.
 - **Measured from the live price.** The stop, target and trail are measured
   from the ticker's last trade just before the order, not from the candle
   close.
-- **`RISK_MODEL=atr`**, with ATR(`ATR_PERIOD=14`) on the entering strategy's
-  timeframe:
+- **`RISK_MODEL=atr`** for trend and breakout (ict reads its stop and target
+  off the chart, see above), with ATR(`ATR_PERIOD=14`) on the entering
+  strategy's timeframe:
   - stop: entry − `ATR_STOP_MULT=3.0` × ATR
   - target: entry + `ATR_TARGET_MULT=6.0` × ATR
   - no trailing stop: `ATR_TRAIL_MULT=0`. A trail of 1.5 ATR armed at +3 ATR
@@ -96,7 +146,8 @@ is not running.
 ## How they relate
 
 `trend` and `breakout` both buy strength, and the regime filter lets them buy
-only in an uptrend.
+only in an uptrend. `ict` buys a dip under a known low inside that uptrend,
+once the structure has turned back up.
 
 They are textbook systems, not a demonstrated edge. In the replay they lost
 in the falling half and won in the rising one (see `CLAUDE.md`).

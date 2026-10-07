@@ -14,7 +14,7 @@ Run from the repository root, with the project virtualenv active:
 import time
 import unittest
 
-from fake_bybit import FakeBybit, candles, heldPosition, runCycle
+from fake_bybit import FakeBybit, candles, heldPosition, ictLong, runCycle
 
 # 3 ATR stop, 6 ATR target, and leverage low enough that the liquidation cap
 # (half of 1/5 of the price, 200 at 2000) stays out of the way of a 60 stop.
@@ -315,6 +315,107 @@ class BreakoutWithoutARuleExit(unittest.TestCase):
         self.assertEqual(cycle.exit_code, 1, cycle.output)
         self.assertIn("CONFIG ERROR: BREAKOUT_LOOKBACK must be >= 1", cycle.output)
         self.assertEqual(client.created_orders, [])
+
+
+# ict trading for real, alone. Leverage 15 as live: the cap (3.33% of 2014,
+# about 67) stays clear of the 36-wide structural stop.
+ict = dict(active_strategies=["ict"], dummy_mode=False, leverage=15)
+
+
+class IctLong(unittest.TestCase):
+    """The setup of fake_bybit.ictLong(): gap 1990-2010, retest closing at
+    2014, structure at candle 1's low 1978, one draw at 2100, ATR about 13.4."""
+
+    def testTheRetestBuysWithTheStructuralStopAndTheDrawAsTarget(self):
+        client = FakeBybit(bars=ictLong())
+
+        # No buffer, so the stop is the structure itself: 1978 is wider than
+        # the 1.5 ATR floor (about 1993.9), and 2100 is 2.3 times the 36 of
+        # risk away.
+        cycle = runCycle(client, ict_stop_buffer_atr=0.0, **ict)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+        order = client.created_orders[0]
+        self.assertEqual(order["side"], "buy")
+        self.assertEqual(order["params"]["stopLoss"]["triggerPrice"], 1978.0)
+        self.assertEqual(order["params"]["takeProfit"]["triggerPrice"], 2100.0)
+        self.assertIn("-i-", order["params"]["orderLinkId"])
+        self.assertEqual(client.trading_stops, [])
+        opened = [push for push in cycle.pushes if push["title"] == "Opened ETH/USDT:USDT"]
+        self.assertIn("strategy ict", opened[0]["message"])
+
+    def testADrawCloserThanTheMinimumRewardRiskIsNotBought(self):
+        client = FakeBybit(bars=ictLong())
+
+        cycle = runCycle(client, ict_min_rr=3.0, **ict)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("under ICT_MIN_RR=3", cycle.output)
+
+    def testALivePriceThatHasLeftTheGapIsNotChased(self):
+        # 2030 is more than half an ATR above the gap's top of 2010.
+        client = FakeBybit(bars=ictLong(), last_price=2030.0)
+
+        cycle = runCycle(client, **ict)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("has left the gap", cycle.output)
+
+    def testAStopTheLiquidationCapPullsInsideTheStructureIsRefused(self):
+        # At 100x the cap allows about 10 of room, and the structure sits 36
+        # under the price.
+        client = FakeBybit(bars=ictLong())
+
+        cycle = runCycle(client, **dict(ict, leverage=100))
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("inside the setup's structure", cycle.output)
+
+    def testAKillZoneThatExcludesTheRetestBarHoldsTheEntryBack(self):
+        # The retest opens 09:45 in New York, outside the London window.
+        client = FakeBybit(bars=ictLong())
+
+        cycle = runCycle(client, ict_kill_zones="02:00-05:00", **ict)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(client.created_orders, [], cycle.output)
+        self.assertIn("opened at 09:45 America/New_York, outside the kill zones", cycle.output)
+
+    def testAKillZoneThatHoldsTheRetestBarLetsTheEntryThrough(self):
+        client = FakeBybit(bars=ictLong())
+
+        cycle = runCycle(client, ict_kill_zones="02:00-05:00,07:00-11:00", **ict)
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        self.assertEqual(len(client.created_orders), 1, cycle.output)
+
+    def testAHeldIctPositionIsNotClosedByARule(self):
+        # Opened in the first cycle, then two cycles on bars whose newest
+        # close breaks the 10-bar low - the breakout exit would sell.
+        client = FakeBybit(bars=ictLong())
+        first = runCycle(client, **ict)
+        self.assertEqual(len(client.created_orders), 1, first.output)
+
+        client.bars = breakingLow()
+        settings = dict(ict, active_strategies=["ict", "breakout"], unknown_owner_exit="any")
+        second = runCycle(client, state_dir=first.state_dir, **settings)
+        third = runCycle(client, state_dir=first.state_dir, **settings)
+
+        self.assertEqual(len(client.created_orders), 1, third.output)
+        for cycle in (second, third):
+            self.assertEqual(cycle.exit_code, 0, cycle.output)
+            self.assertIn("ict exit: none, left to the exchange-side stop and target",
+                          cycle.output)
+
+    def testABadKillZoneIsRefused(self):
+        cycle = runCycle(FakeBybit(bars=ictLong()), ict_kill_zones="9-11", **ict)
+
+        self.assertEqual(cycle.exit_code, 1, cycle.output)
+        self.assertIn("CONFIG ERROR: ICT_KILL_ZONES must be 'off' or HH:MM-HH:MM", cycle.output)
 
 
 class ClosedPositionReport(unittest.TestCase):

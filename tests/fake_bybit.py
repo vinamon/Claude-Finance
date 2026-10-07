@@ -65,6 +65,23 @@ baseline = {
     "adx_min": 20.0,
     "breakout_lookback": 20,
     "breakout_exit_lookback": 10,
+    "ict_swing_bars": 2,
+    "ict_liquidity_lookback_bars": 96,
+    "ict_sweep_reclaim_bars": 1,
+    "ict_mss_max_bars": 8,
+    "ict_displacement_min_atr": 1.0,
+    "ict_fvg_min_atr": 0.1,
+    "ict_fvg_max_age_bars": 12,
+    "ict_entry_close_min": 0.5,
+    "ict_max_chase_atr": 0.5,
+    "ict_kill_zones": "off",
+    "ict_kill_zone_tz": "America/New_York",
+    "ict_stop_ref": "candle1",
+    "ict_stop_buffer_atr": 0.1,
+    "ict_stop_floor_atr": 1.5,
+    "ict_allow_capped_stop": False,
+    "ict_min_rr": 1.5,
+    "ict_fallback_target_r": 2.0,
     "risk_model": "atr",
     "atr_period": 14,
     "atr_stop_mult": 3.0,
@@ -97,6 +114,77 @@ def candles(count=1000, close=2000.0, half_range=10.0, timeframe_seconds=900):
          close, 1.0]
         for i in range(count)
     ]
+
+
+# 2026-09-15 13:45 UTC, 09:45 in New York: the open time of the newest closed
+# bar of a series(). Rules that read the clock - the previous UTC day, kill
+# zones - need a fixed one, not the time the test happens to run.
+anchor_ms = 1789479900000
+
+
+def series(bars, newest_open_ms=anchor_ms, timeframe_seconds=900):
+    """ccxt rows for (open, high, low, close) bars, the last one opening at
+    `newest_open_ms`, plus the candle still forming after it, which opens and
+    sits at the last close."""
+    step_ms = timeframe_seconds * 1000
+    first_ms = newest_open_ms - (len(bars) - 1) * step_ms
+    rows = [[first_ms + i * step_ms, float(o), float(h), float(l), float(c), 1.0]
+            for i, (o, h, l, c) in enumerate(bars)]
+    last = rows[-1][4]
+    return rows + [[newest_open_ms + step_ms, last, last, last, last, 1.0]]
+
+
+def risingRun(count, last_close, step, half_range):
+    """`count` bars climbing `step` a bar to `last_close`, each opening where
+    the previous closed. Highs and lows only rise, so there is no swing in it."""
+    return [(close - step, close + half_range, close - step - half_range, close)
+            for close in (last_close - step * (count - 1 - i) for i in range(count))]
+
+
+def ramp(start, step, count, wick):
+    """`count` bars from `start`, each closing `step` from its open (down when
+    negative), with `wick` beyond its body either side. A straight run has no
+    swing inside it."""
+    bars = []
+    for i in range(count):
+        o = start + step * i
+        c = o + step
+        bars.append((o, max(o, c) + wick, min(o, c) - wick, c))
+    return bars
+
+
+def ictLong():
+    """Candles forming one ict long, newest closed bar the retest, at 09:45 in
+    New York.
+
+    A slow climb (the regime line stays under the price), a run up to a swing
+    high at 2100 and back down, a swing low at 1980, a swing high at 2005, then:
+    a sweep to 1975 that closes back above 1980, a candle 2 closing at 2022
+    above 2005 (the structure shift) and leaving the gap 1990-2010 between
+    candle 1's high and candle 3's low, one bar away, and the first retest:
+    low 2006, close 2014. Candle 1's low, 1978, is the structure; 2100 is the
+    only untouched buy-side level above, the draw. ATR is about 14.
+    """
+    bars = risingRun(300, 2000.0, 0.6, 4.0)
+    bars += ramp(2000.0, 3.0, 30, 2.0)                  # up to 2090
+    bars += [(2090, 2100, 2088, 2093)]                  # the swing high, the draw
+    bars += ramp(2093.0, -3.0, 30, 2.0)                 # down to 2003
+    bars += [
+        (2003, 2006, 1995, 1998),
+        (1998, 2001, 1985, 1990),
+        (1990, 1994, 1980, 1988),                       # swing low 1980
+        (1988, 1998, 1984, 1995),
+        (1995, 2005, 1990, 2000),                       # swing high 2005
+        (2000, 2003, 1990, 1992),
+        (1992, 1996, 1983, 1986),
+        (1986, 1990, 1975, 1984),                       # the sweep
+        (1984, 1990, 1978, 1988),                       # candle 1
+        (1988, 2025, 1987, 2022),                       # candle 2, the structure shift
+        (2022, 2030, 2010, 2026),                       # candle 3
+        (2026, 2032, 2018, 2024),
+        (2024, 2026, 2006, 2014),                       # the retest
+    ]
+    return series(bars)
 
 
 def heldPosition(symbol="ETH/USDT:USDT", contracts=0.22, side="long"):
@@ -182,6 +270,13 @@ class FakeBybit:
         self.created_orders.append({"symbol": symbol, "type": type, "side": side,
                                     "amount": amount, "price": price,
                                     "params": dict(params or {})})
+        # Filled at once: an entry leaves a position for the next cycle to
+        # find, a reduce-only order takes it away.
+        self.positions = [position for position in self.positions
+                          if position.get("symbol") != symbol]
+        if not (params or {}).get("reduceOnly"):
+            self.positions.append(heldPosition(symbol, amount,
+                                               "long" if side == "buy" else "short"))
         return {"id": "fake-order-%d" % len(self.created_orders)}
 
     def privatePostV5PositionTradingStop(self, request):

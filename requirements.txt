@@ -1,3 +1,5 @@
 ccxt==4.5.78
 requests==2.32.3
 python-dotenv==1.0.1
+# Windows has no time zone database; ICT_KILL_ZONES reads New York time from this.
+tzdata==2026.5

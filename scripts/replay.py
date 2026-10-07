@@ -76,6 +76,14 @@ forced = {"DUMMY_MODE": "false", "STRATEGY": "multi", "MIN_ENTRY_VOTES": "1",
 # (label, settings, strategies it concerns or None for all).
 waves = {
     "1": [
+        ("ICT_KILL_ZONES=02:00-05:00,07:00-11:00",
+         {"ICT_KILL_ZONES": "02:00-05:00,07:00-11:00"}, ["ict"]),
+        ("ICT_MIN_RR=1.0", {"ICT_MIN_RR": "1.0"}, ["ict"]),
+        ("ICT_MIN_RR=2.0", {"ICT_MIN_RR": "2.0"}, ["ict"]),
+        ("ICT_MIN_RR=3.0", {"ICT_MIN_RR": "3.0"}, ["ict"]),
+        ("ICT_STOP_REF=leglow", {"ICT_STOP_REF": "leglow"}, ["ict"]),
+        ("ICT_STOP_FLOOR_ATR=1.0", {"ICT_STOP_FLOOR_ATR": "1.0"}, ["ict"]),
+        ("ICT_STOP_FLOOR_ATR=2.0", {"ICT_STOP_FLOOR_ATR": "2.0"}, ["ict"]),
         ("REGIME_PERIOD=400", {"REGIME_PERIOD": "400"}, None),
         ("REGIME_PERIOD=800", {"REGIME_PERIOD": "800"}, None),
         ("BREAKOUT_EXIT_LOOKBACK=0", {"BREAKOUT_EXIT_LOOKBACK": "0"}, ["breakout"]),

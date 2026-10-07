@@ -168,6 +168,279 @@ class PlanEntry(unittest.TestCase):
         self.assertIn("take profit", reason)
 
 
+def bar(o, h, l, c, open_ms=0):
+    return [open_ms, float(o), float(h), float(l), float(c), 1.0]
+
+
+def lowsOnly(values, start_ms=0, step_ms=900000):
+    """Bars that are only their lows, highs 10 above, for the swing tests."""
+    return [bar(low + 5, low + 10, low, low + 5, start_ms + i * step_ms)
+            for i, low in enumerate(values)]
+
+
+class Swings(unittest.TestCase):
+    def testASwingLowIsStrictlyBelowItsNeighboursOnEachSide(self):
+        rows = lowsOnly([10, 9, 5, 8, 9, 7, 7, 8, 9])
+
+        # 5 at index 2; the equal pair of 7s is no swing at all.
+        self.assertEqual(signals.swingLows(rows, 2), [2])
+
+    def testASwingIsOnlyKnownOnceItsConfirmingBarsHaveClosed(self):
+        # The low at index 4 has one bar after it: with two needed, it does
+        # not exist yet, and appears when the second closes.
+        rows = lowsOnly([10, 9, 8, 9, 3, 6])
+        self.assertEqual(signals.swingLows(rows, 2), [])
+        self.assertEqual(signals.swingLows(rows + lowsOnly([7]), 2), [4])
+
+    def testASwingHighMirrorsIt(self):
+        rows = [bar(5, high, 0, 5) for high in [1, 2, 6, 3, 2]]
+        self.assertEqual(signals.swingHighs(rows, 2), [2])
+        self.assertEqual(signals.swingHighs(rows, 1), [2])
+
+
+# 2026-09-14 00:00 UTC and one 15-minute step.
+day0 = 1789344000000
+quarter = 900000
+
+
+class PreviousUtcDay(unittest.TestCase):
+    def rows(self, first_ms, count):
+        # The low falls one a bar, so the day's low is its last bar's.
+        return [bar(100, 110 + i % 7, 90 - i, 100, first_ms + i * quarter) for i in range(count)]
+
+    def testTheLevelsAreThePreviousDaysHighAndLowAndCountFromMidnight(self):
+        rows = self.rows(day0, 96 + 10)
+
+        day = signals.previousDay(rows, 105)
+
+        self.assertEqual(day.high, 116)
+        self.assertEqual(day.low, 90 - 95)
+        self.assertEqual(day.start, day0 + 86400000)
+
+    def testADayOnlyPartlyInTheWindowGivesNoLevels(self):
+        rows = self.rows(day0 + quarter, 95 + 10)
+
+        self.assertIsNone(signals.previousDay(rows, len(rows) - 1))
+
+    def testABarOnTheFirstDayHasNoPreviousDay(self):
+        rows = self.rows(day0, 106)
+
+        self.assertIsNone(signals.previousDay(rows, 50))
+
+
+class SweepsAndDraws(unittest.TestCase):
+    def testASweepTakesAnUntouchedSwingLowAndClosesBackAboveIt(self):
+        # Swing low 5 at index 2, confirmed at 4; bar 6 trades to 4 and
+        # closes at 6.
+        rows = lowsOnly([10, 9, 5, 8, 9, 7]) + [bar(7, 9, 4, 6, 6 * quarter)]
+
+        self.assertEqual(signals.sweptLevels(rows, signals.swingLows(rows, 2), 0, 96, 0),
+                         {6: (5, "swing low")})
+
+    def testATakeWithoutAReclaimInTimeIsNoSweep(self):
+        rows = lowsOnly([10, 9, 5, 8, 9, 7]) + [bar(7, 9, 4, 4.5, 6 * quarter),
+                                                bar(4.5, 5.5, 4, 5.5, 7 * quarter)]
+
+        self.assertEqual(signals.sweptLevels(rows, signals.swingLows(rows, 2), 0, 96, 0), {})
+        self.assertEqual(signals.sweptLevels(rows, signals.swingLows(rows, 2), 0, 96, 1),
+                         {6: (5, "swing low")})
+
+    def testADrawIsASwingHighNothingHasTradedAboveSince(self):
+        rows = [bar(5, high, 0, 5) for high in [1, 2, 9, 3, 2, 6, 4, 3, 8]]
+        swings = signals.swingHighs(rows, 2)
+
+        # 9 is untouched; 6 at index 5 was traded through by the 8.
+        self.assertEqual(swings, [2, 5])
+        self.assertEqual(signals.untouchedHighs(rows, swings, 0, 8), [9.0])
+        self.assertEqual(signals.untouchedHighs(rows, swings, 3, 8), [])
+
+    def testThePreviousDaysHighIsADrawOnlyWhileUntouchedSinceMidnight(self):
+        day = signals.Day(120.0, 80.0, day0)
+        below = [bar(100, 119, 95, 100, day0 + i * quarter) for i in range(3)]
+
+        self.assertEqual(signals.dayHighDraw(below, day), 120.0)
+        self.assertIsNone(signals.dayHighDraw(below + [bar(100, 121, 99, 100, day0 + 3 * quarter)],
+                                              day))
+
+
+class KillZones(unittest.TestCase):
+    # 2026-09-15 13:45 UTC is 09:45 in New York (summer time, UTC-4).
+    retest_ms = 1789479900000
+
+    def testABarIsReadOnTheNewYorkClock(self):
+        self.assertTrue(signals.inKillZone(self.retest_ms, "07:00-11:00", "America/New_York"))
+        self.assertFalse(signals.inKillZone(self.retest_ms, "02:00-05:00", "America/New_York"))
+
+    def testAWindowRunsUpToButNotIncludingItsEnd(self):
+        self.assertFalse(signals.inKillZone(self.retest_ms, "07:00-09:45", "America/New_York"))
+        self.assertTrue(signals.inKillZone(self.retest_ms, "09:45-10:00", "America/New_York"))
+
+    def testAWindowCanRunPastMidnight(self):
+        self.assertTrue(signals.inKillZone(self.retest_ms, "23:00-09:50", "America/New_York"))
+
+    def testOffLetsEveryBarThrough(self):
+        self.assertTrue(signals.inKillZone(self.retest_ms, "off", "America/New_York"))
+
+
+def gapRows():
+    """ATR 10 throughout (passed in, not computed). Candle 1 high 100, candle
+    2 a 15-point up body, candle 3 low 104: the gap is 100-104."""
+    return [bar(95, 98, 92, 96),
+            bar(96, 100, 94, 99),       # 1: candle 1
+            bar(99, 116, 98, 114),      # 2: candle 2
+            bar(114, 118, 104, 117),    # 3: candle 3
+            bar(117, 120, 110, 119)]
+
+
+class GapFinder(unittest.TestCase):
+    atr_values = [10.0] * 5
+
+    def testAGapIsCandleOnesHighToCandleThreesLow(self):
+        gaps = signals.bullishGaps(gapRows(), 0, 4, self.atr_values, 0.1, 1.0)
+
+        self.assertEqual(gaps, [signals.Gap(1, 2, 3, 100.0, 104.0)])
+
+    def testTheMiddleCandleMustBeADisplacementCandle(self):
+        # A 15-point body is 1.5 ATR, not 2.
+        self.assertEqual(signals.bullishGaps(gapRows(), 0, 4, self.atr_values, 0.1, 2.0), [])
+
+    def testAGapSmallerThanTheMinimumDoesNotCount(self):
+        # 4 points is 0.4 ATR.
+        self.assertEqual(signals.bullishGaps(gapRows(), 0, 4, self.atr_values, 0.5, 1.0), [])
+
+    def testCandleTwoMustLieInsideTheLeg(self):
+        self.assertEqual(signals.bullishGaps(gapRows(), 3, 4, self.atr_values, 0.1, 1.0), [])
+
+    def testAGapWhoseThirdCandleHasNotClosedIsNotFound(self):
+        self.assertEqual(signals.bullishGaps(gapRows()[:3], 0, 4, self.atr_values, 0.1, 1.0), [])
+
+
+class Retest(unittest.TestCase):
+    gap = signals.Gap(1, 2, 3, 100.0, 104.0)
+
+    def retest(self, *later, window=3, max_age=12):
+        return signals.gapRetest(gapRows()[:4] + [bar(*row) for row in later], self.gap,
+                                 0.5, max_age, window)
+
+    def testTheFirstTouchOfTheTopThatClosesAboveTheMidpointTriggers(self):
+        self.assertEqual(self.retest((117, 120, 110, 119), (119, 119, 103, 102)), (5, None))
+
+    def testOnlyTheFirstTouchCounts(self):
+        # Bar 4 touched and closed under the midpoint of 102; bar 5 is a
+        # second touch.
+        index, why = self.retest((117, 118, 101, 101.5), (101.5, 106, 101, 105))
+        self.assertIsNone(index)
+        self.assertIn("under 102.000000", why)
+
+    def testACloseBelowTheBottomUpToTheNewestBarKillsTheGap(self):
+        index, why = self.retest((117, 118, 103, 104), (104, 105, 98, 99))
+        self.assertIsNone(index)
+        self.assertIn("closed below the gap", why)
+
+    def testARetestOutsideTheSignalWindowDoesNotTrigger(self):
+        index, why = self.retest((117, 118, 103, 104), (104, 108, 104.5, 107),
+                                 (107, 109, 105, 108), window=2)
+        self.assertIsNone(index)
+        self.assertIn("outside the last 2", why)
+
+    def testARetestLaterThanTheMaximumAgeDoesNotTrigger(self):
+        index, why = self.retest((117, 120, 110, 119), (119, 119, 103, 102), max_age=1)
+        self.assertIsNone(index)
+        self.assertIn("over the 1-bar limit", why)
+
+    def testNoTouchYetIsNoRetest(self):
+        self.assertEqual(self.retest((117, 120, 110, 119)), (None, "no retest of the gap yet"))
+
+
+# The ICT settings planEntry's level path reads, as in .env.example.
+levels = dict(bracket, ict_max_chase_atr=0.5, ict_stop_buffer_atr=0.1, ict_stop_floor_atr=1.5,
+              ict_allow_capped_stop=False, ict_min_rr=1.5, ict_fallback_target_r=2.0)
+
+
+def planSetup(side=signals.long, price=105.0, atr=2.0, draws=(130.0,), structural=96.0,
+               **settings):
+    """The gap 100-104 with its structure at 96, entered at 105, on a 0.5 tick."""
+    setup = signals.levelSetup(100.0, 104.0, structural, draws)
+    with mock.patch.multiple(config, **dict(levels, **settings)):
+        return executor.planEntry(spec, side, setup, price, atr)
+
+
+class PlanEntryLevels(unittest.TestCase):
+    def testTheStopGoesABufferUnderTheStructureAndTheTargetOnTheDraw(self):
+        result = planSetup()
+
+        # 96 - 0.1 x 2 = 95.8, rounded down to the tick
+        self.assertEqual(result["stop_loss"], 95.5)
+        self.assertEqual(result["take_profit"], 130.0)
+        self.assertIsNone(result["refused"])
+        self.assertIsNone(result["trailing_distance"])
+
+    def testAStructureInsideTheFloorIsWidenedToTheFloor(self):
+        # Structure at 104 would be 1 under the price; the floor is 1.5 ATR.
+        result = planSetup(structural=104.0)
+
+        self.assertEqual(result["stop_loss"], 102.0)
+        self.assertIsNone(result["refused"])
+
+    def testTheNearestDrawAboveThePriceIsTheTarget(self):
+        result = planSetup(draws=(103.0, 140.0, 130.0))
+
+        self.assertEqual(result["take_profit"], 130.0)
+
+    def testADrawCloserThanTheMinimumRewardRiskRefusesTheTrade(self):
+        # Risk 9.5, draw 13 away: 1.37 times.
+        code, reason = planSetup(draws=(118.0,))["refused"]
+
+        self.assertEqual(code, "reward-risk")
+        self.assertIn("ICT_MIN_RR", reason)
+
+    def testWithNoDrawTheTargetIsTheFallbackMultipleOfTheRisk(self):
+        # 105 + 2 x 9.5
+        result = planSetup(draws=())
+
+        self.assertEqual(result["take_profit"], 124.0)
+        self.assertIsNone(result["refused"])
+
+    def testAPriceAboveTheChaseLimitOrUnderTheGapIsRefused(self):
+        # The limit is 104 + 0.5 x 2 = 105.
+        self.assertIsNone(planSetup(price=105.0)["refused"])
+        self.assertEqual(planSetup(price=105.5)["refused"][0], "chase")
+        self.assertEqual(planSetup(price=100.0)["refused"][0], "chase")
+
+    def testACapThatPullsTheStopIntoTheStructureIsRefused(self):
+        # At 50x the cap allows 1.05, so the stop would sit at 103.95.
+        code, reason = planSetup(leverage=50)["refused"]
+
+        self.assertEqual(code, "capped-stop")
+        self.assertIn("ICT_ALLOW_CAPPED_STOP", reason)
+
+    def testACappedStopIsTakenWhenAllowed(self):
+        # 30x allows 1.75: 103.25, rounded down to 103, inside the structure
+        # but allowed, and exactly the one-ATR minimum from the price.
+        result = planSetup(leverage=30, ict_allow_capped_stop=True, draws=())
+
+        self.assertEqual(result["stop_loss"], 103.0)
+        self.assertIn("stop capped", result["capped"])
+        self.assertIsNone(result["refused"])
+
+    def testACappedStopUnderTheMinimumAtrMultipleIsStillRefused(self):
+        result = planSetup(leverage=50, ict_allow_capped_stop=True)
+
+        self.assertEqual(result["refused"][0], "min-stop")
+
+    def testAShortReadsTheSetupOnTheMirroredChartAndRoundsOnTheRealOne(self):
+        # On the real chart: gap 196-200 above the price of 195, structure at
+        # 204, draw at 170. The rule read it negated.
+        setup = signals.levelSetup(-200.0, -196.0, -204.0, (-170.0,))
+        with mock.patch.multiple(config, **levels):
+            result = executor.planEntry(spec, signals.short, setup, 195.0, 2.0)
+
+        # 204 + 0.1 x 2 = 204.2, rounded up; the draw itself as the target
+        self.assertEqual(result["stop_loss"], 204.5)
+        self.assertEqual(result["take_profit"], 170.0)
+        self.assertIsNone(result["refused"])
+
+
 class PositionSide(unittest.TestCase):
     def testCcxtsSideIsUsedFirst(self):
         self.assertEqual(executor.positionSide({"side": "short", "info": {"side": "Buy"}}),

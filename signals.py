@@ -11,6 +11,7 @@ touching code. If you find a bare number in a strategy here, it is a bug.
 
 STRATEGIES, AND THEY CAN ALL RUN AT ONCE
 ----------------------------------------
+  ict       sweep of a known low, structure shift, retest of the gap it left
   trend     EMA fast/slow crossover, confirmed by ADX trend strength
   breakout  Donchian (Turtle) channel breakout, asymmetric exit
 
@@ -46,8 +47,12 @@ bar would eventually be missed and leave a position stranded. "Are we on the
 wrong side of the indicator right now" cannot be missed.
 """
 
+import datetime
 import re
 from collections import namedtuple
+from zoneinfo import ZoneInfo
+
+import ccxt
 
 import config
 
@@ -69,8 +74,8 @@ class Decision:
     judged by the same rule that opened the position.
 
     `side` is the side to open. `setup` is None when the stop and target are
-    the ATR bracket; a strategy that reads them off the chart will hand over
-    its levels there instead.
+    the ATR bracket; a strategy that reads them off the chart hands over its
+    levels there instead, as a LevelSetup on the chart the rule read.
     """
 
     def __init__(self, action, reason, strategy=None, votes=None, side=long, setup=None):
@@ -387,6 +392,346 @@ def regimeBroken(candles):
 
 
 # ---------------------------------------------------------------------------
+# ict - a sweep of a known low, a structure shift, the first retest of the gap
+#
+# Sell stops rest under every low the market can see. When a candle trades
+# through such a low and the market closes back above it, the sellers have
+# been forced out and their stops filled the buyers. A close above the last
+# swing high then says the structure has turned, and the fast move that did
+# it usually leaves a fair-value gap: three candles where the third's low sits
+# above the first's high. The entry is the first time price comes back into
+# that gap. The stop goes under the setup's structure, the target at the
+# nearest buy-side level that already existed before the sweep, and only the
+# exchange-side stop and target close the trade.
+#
+# The rules are the trader agent's, issue #15 "Strategy rules". The level
+# helpers below are shared by every strategy that reads levels off the chart,
+# and live in this block because ict is never deleted.
+# ---------------------------------------------------------------------------
+
+day_ms = 86400000
+
+# Candle 1, 2 and 3 of a bullish fair-value gap, and the gap they leave.
+Gap = namedtuple("Gap", "c1 c2 c3 bottom top")
+
+# What a level strategy hands the executor. `bottom` and `top` bound the gap
+# the live price must still be in, `structural` is the price the setup is
+# wrong under (the stop goes a buffer below it), `draws` the levels price is
+# drawn to, lowest first. All on the chart the rule read.
+LevelSetup = namedtuple("LevelSetup", "bottom top structural draws")
+
+# The previous UTC day's range, and when the day after it began: the levels
+# count only while untouched from `start` on.
+Day = namedtuple("Day", "high low start")
+
+
+def swingPoints(values, bars, above):
+    found = []
+    for i in range(bars, len(values) - bars):
+        value = values[i]
+        neighbours = values[i - bars:i] + values[i + 1:i + bars + 1]
+        if all((value > other) if above else (value < other) for other in neighbours):
+            found.append(i)
+    return found
+
+
+def swingHighs(candles, bars):
+    """Indices of swing highs: a high strictly above the `bars` highs on each
+    side.
+
+    A swing at i exists only once bar i + bars has closed, so a peak whose
+    confirming bars are not in `candles` yet is not returned. That delay is
+    what keeps a replay from trading on a swing it could not have seen.
+    """
+    return swingPoints(highs(candles), bars, True)
+
+
+def swingLows(candles, bars):
+    """The mirror of swingHighs: a low strictly below `bars` lows on each side."""
+    return swingPoints(lows(candles), bars, False)
+
+
+def firstBreaks(values, above):
+    """For each bar i, the first later bar whose value goes beyond values[i] -
+    higher when `above`, lower otherwise - or len(values) when none has yet.
+
+    A level is untouched up to that bar and taken on it, so this one pass
+    answers both "is it still untouched" and "which bar swept it".
+    """
+    out = [len(values)] * len(values)
+    waiting = []
+    for k, value in enumerate(values):
+        while waiting and ((value > values[waiting[-1]]) if above
+                           else (value < values[waiting[-1]])):
+            out[waiting.pop()] = k
+        waiting.append(k)
+    return out
+
+
+def previousDay(candles, index):
+    """Day(high, low, start) of the UTC day before the day of bar `index`.
+
+    Derived from the bars' own timestamps, so it needs no other timeframe.
+    None unless the window holds that whole day: a day seen in part has a high
+    and low that are not the day's.
+    """
+    if not candles:
+        return None
+    today = candles[index][0] // day_ms * day_ms
+    yesterday = today - day_ms
+    if candles[0][0] > yesterday:
+        return None
+    rows = [row for row in candles[:index + 1] if yesterday <= row[0] < today]
+    if not rows:
+        return None
+    return Day(max(row[2] for row in rows), min(row[3] for row in rows), today)
+
+
+def inKillZone(open_ms, zones, tz_name):
+    """True when a bar opening at `open_ms` opens inside one of the kill zones.
+
+    `zones` is the ICT_KILL_ZONES text, read on the wall clock of `tz_name`,
+    so daylight saving moves the windows the way it moves the sessions they
+    stand for. "off" lets every bar through.
+    """
+    windows = config.parseKillZones(zones)
+    if windows is None:
+        return True
+    local = datetime.datetime.fromtimestamp(open_ms / 1000.0, ZoneInfo(tz_name))
+    minute = local.hour * 60 + local.minute
+    for start, end in windows:
+        if (start <= minute < end) if start < end else (minute >= start or minute < end):
+            return True
+    return False
+
+
+def bullishGaps(candles, first, last, atr_values, min_atr, displacement_atr):
+    """Bullish fair-value gaps whose candle 2 lies in [first, last].
+
+    Candles 1, 2, 3 leave a gap when low[3] > high[1]; the gap runs from
+    high[1] up to low[3]. It counts when it is at least `min_atr` ATR tall and
+    candle 2 closed up with a body of at least `displacement_atr` ATR, both
+    measured with the ATR at candle 3. Candle 3 must have closed.
+    """
+    found = []
+    for c2 in range(max(1, first), min(last, len(candles) - 2) + 1):
+        c1, c3 = c2 - 1, c2 + 1
+        bottom, top = candles[c1][2], candles[c3][3]
+        measure = atr_values[c3]
+        if top <= bottom or measure is None:
+            continue
+        body = candles[c2][4] - candles[c2][1]
+        if top - bottom < min_atr * measure or body <= 0 or body < displacement_atr * measure:
+            continue
+        found.append(Gap(c1, c2, c3, bottom, top))
+    return found
+
+
+def gapRetest(candles, gap, close_min, max_age, window):
+    """(bar, None) for the retest that triggers an entry, or (None, why not).
+
+    The retest is the FIRST bar after candle 3 whose low reaches the gap's
+    top - one touch, not the best of several. It triggers when it is among the
+    last `window` closed bars, no later than `max_age` bars after candle 3,
+    and closes at or above bottom + `close_min` of the gap. A close below the
+    bottom by any bar up to the newest kills the gap.
+    """
+    newest = len(candles) - 1
+    for k in range(gap.c3 + 1, newest + 1):
+        if candles[k][4] < gap.bottom:
+            return None, "a candle closed below the gap %d bar(s) ago" % (newest - k)
+    touch = next((k for k in range(gap.c3 + 1, newest + 1) if candles[k][3] <= gap.top), None)
+    if touch is None:
+        return None, "no retest of the gap yet"
+    if touch > gap.c3 + max_age:
+        return None, ("the first retest came %d bar(s) after the gap, over the %d-bar limit"
+                      % (touch - gap.c3, max_age))
+    if touch <= newest - window:
+        return None, ("the first retest was %d bar(s) ago, outside the last %d closed bar(s)"
+                      % (newest - touch, window))
+    entry_floor = gap.bottom + close_min * (gap.top - gap.bottom)
+    if candles[touch][4] < entry_floor:
+        return None, ("the retest closed at %.6f, under %.6f, the entry level inside the gap"
+                      % (candles[touch][4], entry_floor))
+    return touch, None
+
+
+def stopReference(candles, gap, retest, leg_low, mode):
+    """The price the setup is wrong under: candle 1's low, or the leg low when
+    `mode` is "leglow", and never above a low printed from candle 3 to the
+    retest."""
+    anchor = leg_low if mode == "leglow" else candles[gap.c1][3]
+    return min([anchor] + lows(candles[gap.c3:retest + 1]))
+
+
+def untouchedHighs(candles, swings, first, last):
+    """The highs of the swings with index in [first, last] that no later bar
+    has traded above, through the newest one."""
+    broken = firstBreaks(highs(candles), True)
+    return [candles[i][2] for i in swings if first <= i <= last and broken[i] == len(candles)]
+
+
+def dayHighDraw(candles, day):
+    """The previous UTC day's high while nothing since that day has traded
+    above it, else None."""
+    since = [row[2] for row in candles if row[0] >= day.start]
+    if since and max(since) > day.high:
+        return None
+    return day.high
+
+
+def levelSetup(bottom, top, structural, draws):
+    """A LevelSetup, its draws sorted from the lowest."""
+    return LevelSetup(bottom, top, structural, tuple(sorted(draws)))
+
+
+def sweptLevels(candles, swing_lows, first, lookback, reclaim):
+    """Bar -> (level, what it was) for every bar from `first` on that swept an
+    untouched sell-side level and closed back above it in time.
+
+    The level is a swing low from the last `lookback` bars, confirmed before
+    the sweeping bar, or the previous UTC day's low. When one bar takes
+    several, the lowest is named.
+    """
+    newest = len(candles) - 1
+    candle_lows = lows(candles)
+    taken_at = firstBreaks(candle_lows, False)
+    candidates = {}
+    for i in swing_lows:
+        s = taken_at[i]
+        # A swing low cannot be broken by its own confirming bars, so the
+        # swing was already known when bar s took it.
+        if first <= s <= newest and i >= s - lookback:
+            candidates.setdefault(s, []).append((candle_lows[i], "swing low"))
+    for s in range(max(1, first), newest + 1):
+        day = previousDay(candles, s)
+        if day is None:
+            continue
+        before = [row[3] for row in candles[:s] if row[0] >= day.start]
+        if candle_lows[s] < day.low and (not before or min(before) >= day.low):
+            candidates.setdefault(s, []).append((day.low, "previous UTC day's low"))
+
+    swept = {}
+    for s, levels in candidates.items():
+        reclaimed = [(level, name) for level, name in levels
+                     if any(candles[k][4] > level for k in range(s, min(s + reclaim, newest) + 1))]
+        if reclaimed:
+            swept[s] = min(reclaimed)
+    return swept
+
+
+def structureShift(candles, swing_highs, sweep, max_bars, bars):
+    """(bar, swing high index) of the first close above the last swing high
+    before the sweep, within `max_bars` of it, or None. The swing high must be
+    confirmed by the bar that closes above it."""
+    price = closes(candles)
+    prior = [j for j in swing_highs if j < sweep]
+    for m in range(sweep, min(sweep + max_bars, len(candles) - 1) + 1):
+        known = [j for j in prior if j + bars <= m]
+        if known and price[m] > candles[known[-1]][2]:
+            return m, known[-1]
+    return None
+
+
+def ictEntry(candles):
+    bars = config.ict_swing_bars
+    lookback = config.ict_liquidity_lookback_bars
+    window = config.signal_lookback_bars
+    # How far back a sweep can sit and still have its retest inside the
+    # signal window: the retest is at most ICT_FVG_MAX_AGE_BARS after candle
+    # 3, which is at most one bar after the structure shift.
+    reach = window + config.ict_fvg_max_age_bars + config.ict_mss_max_bars
+    need = lookback + reach + 2 * bars + 2
+    if len(candles) < need:
+        return Decision(hold, "ict: need %d closed candles, have %d" % (need, len(candles)), "ict")
+
+    atr_values = atr(candles, config.atr_period)
+    if atr_values[-1] is None:
+        return Decision(hold, "ict: ATR%d not seeded yet" % config.atr_period, "ict")
+
+    newest = len(candles) - 1
+    swing_highs = swingHighs(candles, bars)
+    swept = sweptLevels(candles, swingLows(candles, bars), newest - reach, lookback,
+                        config.ict_sweep_reclaim_bars)
+    if not swept:
+        return Decision(hold, "ict: no sweep of a swing low or the previous UTC day's low in "
+                        "the last %d closed bar(s)" % (reach + 1), "ict")
+
+    # Only the most recent structure shift counts. Two sweeps that shift on
+    # the same bar are one leg, read from its first sweep.
+    shift = None
+    for s in sorted(swept):
+        found = structureShift(candles, swing_highs, s, config.ict_mss_max_bars, bars)
+        if found and (shift is None or found[0] > shift[0]):
+            shift = (found[0], found[1], s)
+    if shift is None:
+        s = max(swept)
+        return Decision(hold, "ict: swept the %s %.6f %d bar(s) ago, but no close broke "
+                        "above the last swing high within %d bar(s)"
+                        % (swept[s][1], swept[s][0], newest - s, config.ict_mss_max_bars), "ict")
+    m, high_index, s = shift
+    level, level_name = swept[s]
+
+    gaps = bullishGaps(candles, s, m, atr_values, config.ict_fvg_min_atr,
+                       config.ict_displacement_min_atr)
+    if not gaps:
+        return Decision(hold, "ict: structure shifted above %.6f %d bar(s) ago with no gap of "
+                        "%.2f ATR behind a %.2f ATR candle"
+                        % (candles[high_index][2], newest - m, config.ict_fvg_min_atr,
+                           config.ict_displacement_min_atr), "ict")
+    gap = max(gaps, key=lambda found: found.top)
+
+    retest, why = gapRetest(candles, gap, config.ict_entry_close_min,
+                            config.ict_fvg_max_age_bars, window)
+    if retest is None:
+        return Decision(hold, "ict: gap %.6f-%.6f: %s" % (gap.bottom, gap.top, why), "ict")
+
+    if not inKillZone(candles[retest][0], config.ict_kill_zones, config.ict_kill_zone_tz):
+        opened = datetime.datetime.fromtimestamp(candles[retest][0] / 1000.0,
+                                                 ZoneInfo(config.ict_kill_zone_tz))
+        return Decision(hold, "ict: the retest of gap %.6f-%.6f opened at %s %s, outside the "
+                        "kill zones %s" % (gap.bottom, gap.top, opened.strftime("%H:%M"),
+                                           config.ict_kill_zone_tz, config.ict_kill_zones),
+                        "ict")
+
+    structural = stopReference(candles, gap, retest, min(lows(candles[s:m + 1])),
+                               config.ict_stop_ref)
+    # Targets are levels that already existed before the sweep: swing highs
+    # confirmed by the bar before it, and the previous day's high.
+    draws = untouchedHighs(candles, swing_highs, s - lookback, s - 1 - bars)
+    day = previousDay(candles, s)
+    if day is not None and dayHighDraw(candles, day) is not None:
+        draws.append(day.high)
+
+    return Decision(
+        enter,
+        "ict: swept the %s %.6f %d bar(s) ago and closed back above it, broke above the "
+        "swing high %.6f %d bar(s) ago, and the first retest of the gap %.6f-%.6f closed at "
+        "%.6f %d bar(s) ago (structure low %.6f, %d draw(s))"
+        % (level_name, level, newest - s, candles[high_index][2], newest - m, gap.bottom,
+           gap.top, candles[retest][4], newest - retest, structural, len(draws)),
+        "ict",
+        setup=levelSetup(gap.bottom, gap.top, structural, draws),
+    )
+
+
+def ictCandles():
+    """Closed candles ict needs: a whole previous UTC day plus today so far,
+    or the liquidity lookback if longer, behind the furthest sweep that can
+    still be traded."""
+    per_day = day_ms // 1000 // ccxt.Exchange.parse_timeframe(strategyTimeframe("ict"))
+    return (max(config.ict_liquidity_lookback_bars, 2 * per_day) + config.ict_mss_max_bars
+            + config.ict_fvg_max_age_bars + config.signal_lookback_bars
+            + 2 * config.ict_swing_bars + 5)
+
+
+def ictExit(candles):
+    """None: an ict position is closed by its exchange-side stop and target
+    only. The exit on a bearish structure shift is deferred (#15)."""
+    return Decision(hold, "ict exit: none, left to the exchange-side stop and target", "ict")
+
+
+# ---------------------------------------------------------------------------
 # trend - EMA crossover confirmed by ADX
 #
 # The most-traded system there is, plus the standard fix for its worst flaw.
@@ -590,6 +935,7 @@ def breakoutExit(candles):
 Strategy = namedtuple("Strategy", "entry exit candles")
 
 strategies = {
+    "ict": Strategy(ictEntry, ictExit, ictCandles),
     "trend": Strategy(trendEntry, trendExit, trendCandles),
     "breakout": Strategy(breakoutEntry, breakoutExit, breakoutCandles),
 }
