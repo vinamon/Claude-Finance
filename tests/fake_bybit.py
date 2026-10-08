@@ -87,7 +87,6 @@ baseline = {
     "ict_allow_capped_stop": False,
     "ict_min_rr": 1.5,
     "ict_fallback_target_r": 2.0,
-    "pullback_displacement_min_atr": 1.5,
     "risk_model": "atr",
     "atr_period": 14,
     "atr_stop_mult": 3.0,
@@ -219,72 +218,6 @@ def ictLong():
         (2022, 2030, 2010, 2026),                       # candle 3
         (2026, 2032, 2018, 2024),
         (2024, 2026, 2006, 2014),                       # the retest
-    ]
-    return series(bars)
-
-
-def pullbackLead(leg_low=1996.0, draw=None):
-    """The bars of pullbackLong() up to and including candle 1: the climb, the
-    swing low 1980, the swing high H 2040, the leg low and candle 1 (high
-    2012, low 1998)."""
-    bars = risingRun(300, 2000.0, 0.6, 4.0)
-    if draw is not None:
-        o, h, l, c = bars[240]
-        bars[240] = (o, draw, l, c)
-    bars += [
-        (2000, 2006, 1994, 2002),
-        (2002, 2004, 1990, 1992),
-        (1992, 1996, 1980, 1990),                       # swing low 1980
-        (1990, 2000, 1988, 1998),
-        (1998, 2008, 1992, 2006),
-        (2006, 2020, 2002, 2018),
-        (2018, 2040, 2014, 2036),                       # swing high H 2040
-        (2036, 2038, 2024, 2026),
-        (2026, 2030, 2018, 2020),
-        (2020, 2024, 2008, 2012),
-        (2012, 2016, leg_low, leg_low + 6),             # the leg low
-        (leg_low + 6, 2012, 1998, 2010),                # candle 1
-    ]
-    return bars
-
-
-def pullbackLong(leg_low=1996.0, draw=None):
-    """Candles forming one pullback long, newest closed bar the retest, at
-    09:45 in New York.
-
-    The same slow climb, then a swing low at 1980, a swing high H at 2040, a
-    leg low at `leg_low` (1996: above the 1980) and one big candle, 2010 to
-    2046, that closes above H and leaves the gap 2012-2024 between candle 1's
-    high and candle 3's low. The first retest: low 2022, close 2026. Candle 1's
-    low, 1998, is the structure. Nothing untouched stands above the price, so
-    the target is the fallback multiple of the risk. ATR is about 14. `draw`
-    puts one more swing high, untouched since, into the climb at that price.
-    """
-    bars = pullbackLead(leg_low, draw) + [
-        (2010, 2050, 2008, 2046),                       # candle 2, closes above H
-        (2046, 2062, 2024, 2058),                       # candle 3
-        (2058, 2060, 2022, 2026),                       # the retest
-    ]
-    return series(bars)
-
-
-def pullbackLongGapBeforeBreak():
-    """A pullback long whose gap is left before the break, newest closed bar
-    the retest.
-
-    pullbackLead(), then a candle 2 closing at 2032, still under H 2040, and
-    candle 3: the gap 2012-2024. The next bar touches it and closes at 2016,
-    under its midpoint of 2018 - a failed first touch, if it counted. It is
-    before the break, so it does not. The break is the bar after, closing at
-    2044 with a low of 2015 (a touch on the break bar itself, which does not
-    count either), and the bar after that is the retest: low 2022, close 2026.
-    """
-    bars = pullbackLead() + [
-        (2010, 2034, 2008, 2032),                       # candle 2, under H
-        (2032, 2038, 2024, 2030),                       # candle 3
-        (2030, 2032, 2020, 2016),                       # a touch before the break
-        (2016, 2048, 2015, 2044),                       # the break
-        (2044, 2046, 2022, 2026),                       # the retest
     ]
     return series(bars)
 

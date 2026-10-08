@@ -495,14 +495,20 @@ def stopTooTight(targets, atr_value):
 # ---------------------------------------------------------------------------
 
 
+# Tag letters no strategy may take. "c" marks the bot's own close and "x" an
+# order with no strategy. A removed strategy's letter is never reused, so an
+# old order id in Bybit's history is never read as a newer strategy's.
+reserved_tags = {"c": "the bot's close", "x": "no strategy", "p": "pullback, removed"}
+
+
 def strategyTag(strategy):
     """One character standing for the strategy, for the order id.
 
     Bybit shows orderLinkId in its own UI, so tagging the id means you can
     tell at a glance which rule opened a position without consulting anything
     local. Derived from the name rather than a hardcoded table, so adding a
-    strategy needs no change here - validated for collisions in validate()'s
-    sibling checks by the fact that the names differ in their first letter.
+    strategy needs no change here. tests/test_helpers.py checks that no two
+    strategies share a letter and that none takes one of reserved_tags.
     """
     if not strategy:
         return "x"

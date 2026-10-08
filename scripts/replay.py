@@ -42,9 +42,12 @@ THE KEEP RULE
 The sample is split in two halves by entry time. A row passes when it is
 positive in one half and not negative in the other; a variant helps only when
 it improves the baseline in both halves. One good half is a market, not an
-edge. A setting ict and pullback share (the ICT_ variants run for both) is
-kept only when it helps ict in both halves and makes pullback worse in
-neither; when the two disagree, the default stays.
+edge. An ICT_ setting is kept only when it helps ict long and ict short, each
+in both halves: judged per side and never summed across sides, because in a
+one-directional window anything that cuts the losing side looks good. A
+setting ict shares with breakout (REGIME_PERIOD, SIGNAL_LOOKBACK_BARS, ATR_*)
+must in addition make breakout long worse in neither half. Otherwise the
+default stays.
 
 Candles are cached under state/candles/, which is gitignored. --offline uses
 the cache alone.
@@ -80,10 +83,9 @@ base_environ = dict(os.environ)
 forced = {"DUMMY_MODE": "false", "STRATEGY": "multi", "MIN_ENTRY_VOTES": "1",
           "LOG_DETAIL": "false"}
 
-# The strategies that read the ICT_ settings. pullback shares ict's retest,
-# kill zones, chase limit, stop and target, so a shared setting is judged on
-# both (the trader's ruling; see THE KEEP RULE above).
-level_strategies = ["ict", "pullback"]
+# The strategies that read the ICT_ settings: ict alone, judged on its long and
+# its short side apart (the trader's ruling; see THE KEEP RULE above).
+level_strategies = ["ict"]
 
 # Variants to try against the baseline, one change at a time:
 # (label, settings, strategies it concerns or None for all).

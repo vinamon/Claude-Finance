@@ -12,7 +12,6 @@ touching code. If you find a bare number in a strategy here, it is a bug.
 STRATEGIES, AND THEY CAN ALL RUN AT ONCE
 ----------------------------------------
   ict       sweep of a known low, structure shift, retest of the gap it left
-  pullback  break of a swing high after a higher low, retest of the gap it left
   trend     EMA fast/slow crossover, confirmed by ADX trend strength
   breakout  Donchian (Turtle) channel breakout, asymmetric exit
 
@@ -365,9 +364,9 @@ def regimeBroken(candles):
 
     Used as an exit override for every strategy whose exit is a rule, and for
     a position whose owner is unknown, so it is closed when the reason to
-    hold it at all is gone. A strategy registered as brackets_only (ict,
-    pullback) is exempt; see exitSignal. Read on the chart of the position's
-    side, like regimeState. Controlled by EXIT_ON_REGIME_BREAK.
+    hold it at all is gone. A strategy registered as brackets_only (ict) is
+    exempt; see exitSignal. Read on the chart of the position's side, like
+    regimeState. Controlled by EXIT_ON_REGIME_BREAK.
     """
     if not config.exit_on_regime_break or not config.regime_filter:
         return False, "regime-break exit off"
@@ -407,9 +406,9 @@ def regimeBroken(candles):
 # nearest buy-side level that already existed before the sweep, and only the
 # exchange-side stop and target close the trade.
 #
-# The rules are the trader agent's, issue #15 "Strategy rules". The level
-# helpers below are shared by every strategy that reads levels off the chart,
-# and live in this block because ict is never deleted.
+# The rules are the trader agent's, issue #15 "Strategy rules". Every level
+# helper below - swings, sweeps, gaps, the retest, the stop and the draws - is
+# ict's, so deleting ict would remove this block whole.
 # ---------------------------------------------------------------------------
 
 day_ms = 86400000
@@ -640,7 +639,7 @@ def structureShift(candles, swing_highs, sweep, max_bars, bars):
     return None
 
 
-def retestedGap(name, candles, gap, move_end):
+def retestedGap(candles, gap, move_end):
     """(bar, None) for the retest of the gap that triggers an entry, or (None,
     the hold Decision saying why not): the first touch after `move_end`, inside
     the signal window and the age limit, closing in the upper part of the gap,
@@ -648,16 +647,15 @@ def retestedGap(name, candles, gap, move_end):
     retest, why = gapRetest(candles, gap, move_end, config.ict_entry_close_min,
                             config.ict_fvg_max_age_bars, config.signal_lookback_bars)
     if retest is None:
-        return None, Decision(hold, "%s: gap %.6f-%.6f: %s" % (name, gap.bottom, gap.top, why),
-                              name)
+        return None, Decision(hold, "ict: gap %.6f-%.6f: %s" % (gap.bottom, gap.top, why), "ict")
 
     if not inKillZone(candles[retest][0], config.ict_kill_zones, config.ict_kill_zone_tz):
         opened = datetime.datetime.fromtimestamp(candles[retest][0] / 1000.0,
                                                  ZoneInfo(config.ict_kill_zone_tz))
         return None, Decision(
-            hold, "%s: the retest of gap %.6f-%.6f opened at %s %s, outside the kill zones %s"
-            % (name, gap.bottom, gap.top, opened.strftime("%H:%M"), config.ict_kill_zone_tz,
-               config.ict_kill_zones), name)
+            hold, "ict: the retest of gap %.6f-%.6f opened at %s %s, outside the kill zones %s"
+            % (gap.bottom, gap.top, opened.strftime("%H:%M"), config.ict_kill_zone_tz,
+               config.ict_kill_zones), "ict")
     return retest, None
 
 
@@ -726,7 +724,7 @@ def ictEntry(candles):
                            config.ict_displacement_min_atr), "ict")
     gap = max(gaps, key=lambda found: found.top)
 
-    retest, held = retestedGap("ict", candles, gap, m)
+    retest, held = retestedGap(candles, gap, m)
     if retest is None:
         return held
 
@@ -745,156 +743,20 @@ def ictEntry(candles):
     )
 
 
-def levelCandles(name):
-    """Closed candles a level strategy needs: a whole previous UTC day plus
-    today so far, or the liquidity lookback if longer, behind the furthest
-    move that can still be traded."""
-    per_day = day_ms // 1000 // ccxt.Exchange.parse_timeframe(strategyTimeframe(name))
+def ictCandles():
+    """Closed candles ict needs: a whole previous UTC day plus today so far,
+    or the liquidity lookback if longer, behind the furthest move that can
+    still be traded."""
+    per_day = day_ms // 1000 // ccxt.Exchange.parse_timeframe(strategyTimeframe("ict"))
     return (max(config.ict_liquidity_lookback_bars, 2 * per_day) + config.ict_mss_max_bars
             + config.ict_fvg_max_age_bars + config.signal_lookback_bars
             + 2 * config.ict_swing_bars + 5)
-
-
-def ictCandles():
-    """Closed candles ict needs."""
-    return levelCandles("ict")
 
 
 def ictExit(candles):
     """None: an ict position is closed by its exchange-side stop and target
     only. The exit on a bearish structure shift is deferred (#15)."""
     return Decision(hold, "ict exit: none, left to the exchange-side stop and target", "ict")
-
-
-# ---------------------------------------------------------------------------
-# pullback - the break of a swing high after a higher low, then the gap retest
-#
-# ict without the sweep. In an uptrend the market makes a swing high, dips to a
-# low that sits above the swing low before it (the higher low, so the trend is
-# intact), and then closes above that swing high in one big candle that leaves
-# a fair-value gap. The entry is the first retest of the gap, exactly as for
-# ict, with the same stop, chase limit and targets: the low of the dip plays
-# the part of the swept low. Most of the time no untouched level stands above
-# the price, and the target is the fallback multiple of the risk.
-#
-# The rules are the trader agent's, issue #15 "Strategy rules". Everything not
-# named PULLBACK_ is an ICT_ setting shared with ict; this block is the leg
-# search, its one setting, and nothing else, so deleting pullback removes it
-# whole.
-# ---------------------------------------------------------------------------
-
-# Bar indices of a pullback leg: the swing high H, the first close above it
-# (the break), and the lowest low between them (the leg low).
-Leg = namedtuple("Leg", "high break_bar low")
-
-
-def pullbackLeg(candles, swing_highs, swing_lows, bars, reach, max_bars):
-    """(Leg, None) for the latest break of a swing high that follows a higher
-    low, or (None, why not).
-
-    H is judged AS OF the break bar: the latest swing high already confirmed
-    when that bar closed, not the latest one today. A swing high that forms
-    after the break has nothing to do with it, and judged from today it would
-    sit above the break and hide it, so no setup could ever trigger.
-
-    The break is the FIRST close above H, among the last `reach` + 1 bars; only
-    the most recent break is judged. The leg low is the lowest low from the bar
-    after H to the break (the latest of tied lows). It must lie above the low of
-    the last swing low before H - a higher low - and no more than `max_bars`
-    before the break.
-    """
-    price, high, low = closes(candles), highs(candles), lows(candles)
-    newest = len(candles) - 1
-    for b in range(newest, max(newest - reach, 0) - 1, -1):
-        known = [j for j in swing_highs if j + bars <= b]
-        if not known:
-            continue
-        j = known[-1]
-        if price[b] <= high[j] or any(price[k] > high[j] for k in range(j + 1, b)):
-            continue
-
-        before = [i for i in swing_lows if i < j]
-        if not before:
-            return None, ("no confirmed swing low before the swing high %.6f, so no higher low "
-                          "to judge" % high[j])
-        leg_low = min(low[j + 1:b + 1])
-        i = max(k for k in range(j + 1, b + 1) if low[k] == leg_low)
-        if leg_low <= low[before[-1]]:
-            return None, ("the leg low %.6f is not above the prior swing low %.6f: a lower low, "
-                          "not a pullback" % (leg_low, low[before[-1]]))
-        if b - i > max_bars:
-            return None, ("the leg low is %d bar(s) before the break, over the %d-bar limit"
-                          % (b - i, max_bars))
-        return Leg(j, b, i), None
-    return None, ("no close above the latest swing high in the last %d closed bar(s)"
-                  % (reach + 1))
-
-
-def pullbackEntry(candles):
-    bars = config.ict_swing_bars
-    lookback = config.ict_liquidity_lookback_bars
-    window = config.signal_lookback_bars
-    # How old the break may be: the retest window plus the retest's age limit
-    # (issue #15).
-    reach = window + config.ict_fvg_max_age_bars
-    need = lookback + reach + config.ict_mss_max_bars + 2 * bars + 2
-    if len(candles) < need:
-        return Decision(hold, "pullback: need %d closed candles, have %d" % (need, len(candles)),
-                        "pullback")
-
-    atr_values = atr(candles, config.atr_period)
-    if atr_values[-1] is None:
-        return Decision(hold, "pullback: ATR%d not seeded yet" % config.atr_period, "pullback")
-
-    newest = len(candles) - 1
-    swing_highs = swingHighs(candles, bars)
-    leg, why = pullbackLeg(candles, swing_highs, swingLows(candles, bars), bars, reach,
-                           config.ict_mss_max_bars)
-    if leg is None:
-        return Decision(hold, "pullback: %s" % why, "pullback")
-
-    broken = candles[leg.high][2]
-    gaps = bullishGaps(candles, leg.low, leg.break_bar, atr_values, config.ict_fvg_min_atr,
-                       config.pullback_displacement_min_atr)
-    if not gaps:
-        return Decision(hold, "pullback: broke above the swing high %.6f %d bar(s) ago with no "
-                        "gap of %.2f ATR behind a %.2f ATR candle"
-                        % (broken, newest - leg.break_bar, config.ict_fvg_min_atr,
-                           config.pullback_displacement_min_atr), "pullback")
-    gap = max(gaps, key=lambda found: found.top)
-
-    retest, held = retestedGap("pullback", candles, gap, leg.break_bar)
-    if retest is None:
-        return held
-
-    # H is broken by definition, so no draw could be it; it is left out
-    # explicitly because the rule says so.
-    structural, draws = structureAndDraws(
-        candles, [i for i in swing_highs if i != leg.high], gap, retest, candles[leg.low][3],
-        leg.low)
-
-    return Decision(
-        enter,
-        "pullback: broke above the swing high %.6f %d bar(s) ago after a higher low of %.6f, "
-        "and the first retest of the gap %.6f-%.6f closed at %.6f %d bar(s) ago (structure "
-        "low %.6f, %d draw(s))"
-        % (broken, newest - leg.break_bar, candles[leg.low][3], gap.bottom, gap.top,
-           candles[retest][4], newest - retest, structural, len(draws)),
-        "pullback",
-        setup=levelSetup(gap.bottom, gap.top, structural, draws),
-    )
-
-
-def pullbackCandles():
-    """Closed candles pullback needs: the same as ict, on its own clock."""
-    return levelCandles("pullback")
-
-
-def pullbackExit(candles):
-    """None: a pullback position is closed by its exchange-side stop and
-    target only, as for ict."""
-    return Decision(hold, "pullback exit: none, left to the exchange-side stop and target",
-                    "pullback")
 
 
 # ---------------------------------------------------------------------------
@@ -1105,7 +967,6 @@ Strategy = namedtuple("Strategy", "entry exit candles brackets_only", defaults=(
 
 strategies = {
     "ict": Strategy(ictEntry, ictExit, ictCandles, brackets_only=True),
-    "pullback": Strategy(pullbackEntry, pullbackExit, pullbackCandles, brackets_only=True),
     "trend": Strategy(trendEntry, trendExit, trendCandles),
     "breakout": Strategy(breakoutEntry, breakoutExit, breakoutCandles),
 }

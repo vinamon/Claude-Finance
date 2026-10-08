@@ -319,8 +319,8 @@ class Retest(unittest.TestCase):
     gap = signals.Gap(1, 2, 3, 100.0, 104.0)
 
     def retest(self, *later, window=3, max_age=12, move_end=3):
-        # `move_end` is the bar the move that left the gap ended on: the structure
-        # shift for ict, the break for pullback. By default candle 3 itself.
+        # `move_end` is the bar the move that left the gap ended on: ict's
+        # structure shift. By default candle 3 itself.
         return signals.gapRetest(gapRows()[:4] + [bar(*row) for row in later], self.gap,
                                  move_end, 0.5, max_age, window)
 
@@ -373,105 +373,6 @@ class Retest(unittest.TestCase):
                                  (101.5, 106, 101, 105), move_end=4)
         self.assertIsNone(index)
         self.assertIn("under 102.000000", why)
-
-
-def hlc(*rows):
-    """Bars from (high, low, close) rows, each opening at its own close."""
-    return [bar(c, h, l, c, i * quarter) for i, (h, l, c) in enumerate(rows)]
-
-
-# A swing low at 1 (low 6), the swing high H at 3 (15), a pullback whose lowest
-# low is 7.5 at 6, and a close at 8 of 16, above H.
-leg_rows = [(10, 8, 9), (9, 6, 7), (12, 7, 11), (15, 10, 14), (13, 9, 11), (12, 8, 9),
-            (11, 7.5, 10), (13, 8.5, 12), (17, 12, 16), (18, 14, 17)]
-
-
-def findLeg(rows, reach=5, max_bars=8):
-    candles = hlc(*rows)
-    return signals.pullbackLeg(candles, signals.swingHighs(candles, 1),
-                               signals.swingLows(candles, 1), 1, reach, max_bars)
-
-
-class PullbackLeg(unittest.TestCase):
-    def testTheFirstCloseAboveTheSwingHighAfterAHigherLowIsTheBreak(self):
-        leg, why = findLeg(leg_rows)
-
-        # H at 3, the break at 8 (the newest bar, 9, is not the first close
-        # above), and the leg low at 6, over the swing low at 1.
-        self.assertEqual(leg, signals.Leg(3, 8, 6), why)
-
-    def testTheSwingHighIsJudgedAsOfTheBreakBar(self):
-        # Bars 10 and 11 make a swing high at 9 (18) that nothing has closed
-        # above. Judged from today it would be the latest swing high, and no
-        # break would exist; as of bar 8 it is not yet confirmed.
-        rows = leg_rows + [(16, 13, 15), (14, 11, 12)]
-        self.assertEqual(signals.swingHighs(hlc(*rows), 1)[-1], 9)
-
-        leg, why = findLeg(rows, reach=5)
-
-        self.assertEqual(leg, signals.Leg(3, 8, 6), why)
-
-    def testALaterBarThatClosesAboveIsNotTheFirstCloseAbove(self):
-        # Bar 8 already closed above H; bars 9, 10 and 11 are in reach but
-        # none of them is the break.
-        rows = leg_rows + [(16, 13, 15), (14, 11, 12)]
-
-        leg, why = findLeg(rows, reach=2)
-
-        self.assertIsNone(leg)
-        self.assertIn("no close above the latest swing high", why)
-
-    def testASwingHighConfirmedBeforeTheBreakReplacesTheOlderOne(self):
-        # H moves to the lower swing high at 6 (12.5), broken by the close of
-        # 13.5 at 8. The leg low is then the lowest low from 7 to 8.
-        rows = [(10, 8, 9), (9, 6, 7), (12, 7, 11), (15, 10, 14), (13, 9, 11), (11, 7.5, 10),
-                (12.5, 9, 12), (12, 10, 11), (14, 11, 13.5)]
-
-        leg, why = findLeg(rows)
-
-        self.assertEqual(leg, signals.Leg(6, 8, 7), why)
-
-    def testALegLowAtOrBelowThePriorSwingLowIsNotAPullback(self):
-        rows = list(leg_rows)
-        rows[6] = (11, 5.5, 10)
-
-        leg, why = findLeg(rows)
-
-        self.assertIsNone(leg)
-        self.assertIn("not above the prior swing low", why)
-
-    def testALegLowEqualToThePriorSwingLowIsNotAPullback(self):
-        rows = list(leg_rows)
-        rows[6] = (11, 6, 10)
-
-        self.assertIn("not above the prior swing low", findLeg(rows)[1])
-
-    def testALegLowTooFarBeforeTheBreakIsRefused(self):
-        leg, why = findLeg(leg_rows, max_bars=1)
-
-        self.assertIsNone(leg)
-        self.assertIn("2 bar(s) before the break, over the 1-bar limit", why)
-
-    def testNoPriorSwingLowMeansNoHigherLowToJudge(self):
-        rows = [(10, 9, 9.5), (12, 8, 11), (15, 7, 14), (13, 9, 11), (12, 8, 9),
-                (11, 7.5, 10), (13, 8.5, 12), (17, 12, 16)]
-
-        leg, why = findLeg(rows)
-
-        self.assertIsNone(leg)
-        self.assertIn("no confirmed swing low before the swing high", why)
-
-    def testABreakOlderThanTheReachIsNotLookedAt(self):
-        leg, why = findLeg(leg_rows, reach=0)
-
-        self.assertIsNone(leg)
-        self.assertIn("no close above the latest swing high", why)
-
-    def testTheLegLowIsTheLatestOfTiedLows(self):
-        rows = list(leg_rows)
-        rows[7] = (13, 7.5, 12)
-
-        self.assertEqual(findLeg(rows)[0], signals.Leg(3, 8, 7))
 
 
 # The ICT settings planEntry's level path reads, as in .env.example.
@@ -575,6 +476,18 @@ class PositionSide(unittest.TestCase):
 
     def testARowThatSaysNothingIsALong(self):
         self.assertEqual(executor.positionSide({}), signals.long)
+
+
+class OrderTags(unittest.TestCase):
+    def testEveryStrategyHasItsOwnLetterAndNoneTakesAReservedOne(self):
+        # A letter shared, or one a removed strategy used, would make an order
+        # id in Bybit's history name the wrong rule.
+        tags = {name: executor.strategyTag(name) for name in signals.strategies}
+
+        self.assertEqual(len(set(tags.values())), len(tags), tags)
+        for name, tag in tags.items():
+            self.assertNotIn(tag, executor.reserved_tags, "%s takes %r, reserved for %s"
+                             % (name, tag, executor.reserved_tags.get(tag)))
 
 
 if __name__ == "__main__":
