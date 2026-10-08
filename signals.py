@@ -686,9 +686,9 @@ def ictExit(candles):
 # symmetric channel gives back most of a move before admitting it is over,
 # because by the time price makes a new N-bar low the trend has been dead for
 # a long time. BREAKOUT_LOOKBACK sets the entry channel,
-# BREAKOUT_EXIT_LOOKBACK the (shorter) exit channel. An exit lookback of 0
-# switches the rule exit off: the position is left to its exchange-side stop
-# and target.
+# BREAKOUT_EXIT_LOOKBACK the (shorter) exit channel. An exit lookback of 0,
+# the default since the #21 replay, switches the rule exit off: the position
+# is left to its exchange-side stop and target.
 # ---------------------------------------------------------------------------
 
 

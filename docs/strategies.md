@@ -15,7 +15,7 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
 - **Market:** ten Bybit USDT perpetuals: BTC, ETH, XRP, SOL, ZEC, NEAR, HYPE,
   DOGE, 1000PEPE and BCH. This is a demo account.
 - **Direction:** long, and short for the strategies named in
-  `SHORT_STRATEGIES` (empty, so long only today). A short is the exact mirror
+  `SHORT_STRATEGIES=ict` (ict trades both sides). A short is the exact mirror
   of the long rule; see "Shorts" below. A short already held, opened by the
   bot or by hand, is judged by the mirror of the exit rule.
 - **Clock:** 15-minute candles (`ENTRY_TIMEFRAME=15m`) for every strategy.
@@ -29,8 +29,9 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
   saying `enter` opens the position, on the side its Decision carries. Votes
   count on one side only: the side of the highest-priority strategy that
   fired.
-- **Live set:** `ACTIVE_STRATEGIES=breakout`. ict is described below but is
-  not trading: it goes live with the rest of the rework (issue #15). meanrev,
+- **Live set:** `ACTIVE_STRATEGIES=ict`, as an experiment through its first
+  review (about 100 trades per side). breakout is described below but is not
+  trading: run beside ict it took the symbols ict needed (#21). meanrev,
   scalp, pullback and trend lost money in the replay and were removed.
 - **Unknown owner:** `UNKNOWN_OWNER_EXIT=regime`. A position whose strategy
   is unknown or no longer active is left to its exchange-side stop and
@@ -72,7 +73,8 @@ asymmetric defaults. The rules below are written for longs; for a short read
   day's low) that existed before the sweep.
 - **breakout short:** a close below the lowest low of the previous
   `BREAKOUT_LOOKBACK=20` bars; exit on a close above the highest high of the
-  previous `BREAKOUT_EXIT_LOOKBACK=10` bars (0 = no rule exit).
+  previous `BREAKOUT_EXIT_LOOKBACK` bars, off at the default of 0. Not in
+  `SHORT_STRATEGIES`: it lost in both halves of the replay.
 - **Brackets:** the stop sits above the live price and the target below it,
   at the same distances as the long's (3 and 6 ATR, or the setup's levels).
   The stop rounds up to the tick and the target down, so the stop is never
@@ -135,12 +137,13 @@ ATR(`ATR_PERIOD=14`) on the same candles. Tag `i` in the order id.
 - **Entry:** a close above the highest high of the previous
   `BREAKOUT_LOOKBACK=20` bars, within the lookback window. The breaking bar
   is not part of its own level.
-- **Exit:** a close below the lowest low of the previous
-  `BREAKOUT_EXIT_LOOKBACK=10` bars. `BREAKOUT_EXIT_LOOKBACK=0` means no rule
-  exit at all: the position is left to its exchange-side stop and target. The
-  replay tests that variant next to 10 and 20 (wave 1).
-- **Why the asymmetry:** it is the original Turtle rule. A symmetric exit
-  gives back most of the move before admitting the trend is over.
+- **Exit:** none by rule. `BREAKOUT_EXIT_LOOKBACK=0`: the position is left
+  to its exchange-side stop and target. On the long side it was the one
+  variant of the #21 replay that passed, ahead of a 20-bar and a 10-bar exit.
+- **With a rule exit** (`BREAKOUT_EXIT_LOOKBACK` above 0): a close below the
+  lowest low of that many previous bars, fewer than the entry's. That is the
+  original Turtle asymmetry: a symmetric exit gives back most of the move
+  before admitting the trend is over.
 
 ## Risk, applied to every entry
 

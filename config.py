@@ -235,17 +235,25 @@ strategy = envStr("STRATEGY", "multi")
 # than one fires on the same bar the first listed owns the position, and its
 # exit rule is what will close it. Ignored unless STRATEGY=multi.
 #
-# breakout alone. In the 25.8-day replay it was the one strategy that paid:
-# +0.16% a trade over 313 trades, while meanrev and scalp lost money and
-# closed two trades in three on their own exit rule, a small loss plus fees.
-active_strategies = envList("ACTIVE_STRATEGIES", ["breakout"])
+# ict alone, as an experiment rather than for profit. In the 90-day replay
+# (#21) every baseline row failed, each strategy on each side, and both halves
+# of that window rose, so every verdict so far means "two rising markets".
+# ict runs at its defaults through its first review, about 100 trades per side
+# (some three months), at an expected cost of about 100 USDT of demo money a
+# month. breakout stays off: its long side with no rule exit was the one row
+# that passed, thinly, but run beside ict it held most symbols and ict long
+# fell from 111 trades to 15.
+active_strategies = envList("ACTIVE_STRATEGIES", ["ict"])
 
 # Which of the live strategies may also trade short, as a comma list. Empty
 # means long only. A short is the exact mirror of the strategy's long rule,
 # read on the chart turned upside down, with no separate settings: it enters
 # only below the regime line, where the long side may not. A side that fails
 # the replay is left out of this list without touching its long side.
-short_strategies = envList("SHORT_STRATEGIES", [])
+#
+# ict, so both of its sides get a verdict at its review. breakout short lost
+# in both halves of the replay and stays out.
+short_strategies = envList("SHORT_STRATEGIES", ["ict"])
 
 # Per-strategy timeframe override, as "name:timeframe,name:timeframe".
 # Anything not listed runs on ENTRY_TIMEFRAME.
@@ -259,12 +267,16 @@ strategy_timeframes = envMap("STRATEGY_TIMEFRAMES", {})
 # Per-strategy ceiling on open positions, as "name:count". A strategy not
 # listed is limited only by MAX_OPEN_POSITIONS.
 #
-# Empty by default, because it only matters when strategies run on different
-# clocks. A 15-minute rule fires many times more often than an hourly one, so
-# with mixed timeframes it reaches every free slot first and the slow rules
-# never get to trade; budgeting them separately fixes that. With every rule on
-# the same clock there is nothing to protect, and a cap only turns signals
-# away.
+# One position per symbol means a strategy holding a symbol blocks every
+# other strategy on it, on one clock as much as on several: with ten symbols
+# and MAX_OPEN_POSITIONS=10 the symbols run out, not the slots. Measured in the
+# replay of ict and breakout together (#21): breakout long held most symbols
+# most of the time and ict long fell from 111 trades to 15. Mixed timeframes
+# make it worse, as the faster rule reaches every free symbol first.
+#
+# Empty by default: with ict alone live, a cap only turns its own signals
+# away. "breakout:4" beside ict should limit the blocking; that is not
+# measured, as the replay plays each symbol on its own.
 max_open_per_strategy = envMap("MAX_OPEN_PER_STRATEGY", {}, int)
 
 # How many active strategies must agree before a position opens. 1 is "any
@@ -366,13 +378,19 @@ unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "regime")
 # breakout - Donchian channel, Turtle style
 # ---------------------------------------------------------------------------
 
-# Enter on a close above the N-bar high, leave on a close below the M-bar low,
-# M shorter than N. The asymmetry is the original Turtle rule: a symmetric
-# channel gives back most of a move before admitting the trend is over.
-# An exit lookback of 0 means no rule exit: the exchange-side stop and target
-# alone close the trade.
+# Enter on a close above the N-bar high. With an exit lookback M above 0,
+# leave on a close below the M-bar low, M shorter than N: the original Turtle
+# rule, as a symmetric channel gives back most of a move before admitting the
+# trend is over.
+#
+# 0 by default: no rule exit, the exchange-side stop and target alone close
+# the trade. On the long side it was the one row of the #21 variants that
+# passed: it changed the payoff, not the trade count, and the results ran in
+# order - a 10-bar exit worst, 20 better, none best. A 10-bar exit on
+# 15-minute candles is 2.5 hours of noise. Measured on a window where both halves rose; expect it to
+# lose in a falling market.
 breakout_lookback = envInt("BREAKOUT_LOOKBACK", 20)
-breakout_exit_lookback = envInt("BREAKOUT_EXIT_LOOKBACK", 10)
+breakout_exit_lookback = envInt("BREAKOUT_EXIT_LOOKBACK", 0)
 
 # ---------------------------------------------------------------------------
 # ict - sweep, structure shift, fair-value gap retest

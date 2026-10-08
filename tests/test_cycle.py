@@ -14,8 +14,9 @@ Run from the repository root, with the project virtualenv active:
 import time
 import unittest
 
-from fake_bybit import (FakeBybit, breakingDown, breakingUp, candles, heldPosition, ictLong,
-                        ictLongGapBeforeShift, ictShort, risingRun, runCycle, series)
+from fake_bybit import (FakeBybit, breakingDown, breakingUp, candles, controlPanel, heldPosition,
+                        ictLong, ictLongGapBeforeShift, ictShort, risingRun, runCycle, series,
+                        settingsFrom)
 
 # 3 ATR stop, 6 ATR target, and leverage low enough that the liquidation cap
 # (half of 1/5 of the price, 200 at 2000) stays out of the way of a 60 stop.
@@ -486,6 +487,79 @@ class IctLong(unittest.TestCase):
 
         self.assertEqual(cycle.exit_code, 1, cycle.output)
         self.assertIn("CONFIG ERROR: ICT_KILL_ZONES must be 'off' or HH:MM-HH:MM", cycle.output)
+
+
+def goLiveSettings():
+    """(name, settings) for the two places a fresh checkout takes its
+    settings from: the code's defaults and the control panel, .env.example.
+    The code falls back to 1x and 1000 USDT on purpose when nothing sets the
+    size, and to dummy mode, so those are given the panel's values; every
+    strategy setting is the source's own."""
+    live = dict(dummy_mode=False, leverage=15, position_notional_usdt=450.0)
+    return [("code defaults", dict(settingsFrom({}), **live)),
+            ("control panel", settingsFrom(controlPanel()))]
+
+
+class GoLive(unittest.TestCase):
+    """What the owner decided on 2026-10-08: ict on both sides, breakout kept
+    but off, 450 USDT at 15x. A fresh checkout must trade exactly that."""
+
+    def testIctBuysALongTaggedI(self):
+        for name, settings in goLiveSettings():
+            with self.subTest(name):
+                client = FakeBybit(bars=ictLong())
+
+                cycle = runCycle(client, **settings)
+
+                self.assertEqual(cycle.exit_code, 0, cycle.output)
+                self.assertEqual([order["side"] for order in client.created_orders], ["buy"],
+                                 cycle.output)
+                self.assertIn("-i-", client.created_orders[0]["params"]["orderLinkId"])
+                self.assertIn("USDT at 15x", cycle.output)
+                self.assertNotIn("CONFIG WARNING", cycle.output)
+
+    def testIctSellsAShortTaggedI(self):
+        for name, settings in goLiveSettings():
+            with self.subTest(name):
+                client = FakeBybit(bars=ictShort())
+
+                cycle = runCycle(client, **settings)
+
+                self.assertEqual(cycle.exit_code, 0, cycle.output)
+                self.assertEqual([order["side"] for order in client.created_orders], ["sell"],
+                                 cycle.output)
+                self.assertIn("-i-", client.created_orders[0]["params"]["orderLinkId"])
+
+    def testABreakoutOnEitherSideIsNotTraded(self):
+        for name, settings in goLiveSettings():
+            with self.subTest(name):
+                for bars in (breakingUp(), breakingDown()):
+                    client = FakeBybit(bars=bars)
+
+                    cycle = runCycle(client, **settings)
+
+                    self.assertEqual(cycle.exit_code, 0, cycle.output)
+                    self.assertEqual(client.created_orders, [], cycle.output)
+
+    def testABreakoutPositionOpenAtTheSwitchIsLeftToItsStopAndTarget(self):
+        # Opened while breakout was live; after the switch its owner is not
+        # live, so the unknown-owner rule keeps it, even on bars that break
+        # the 10-bar low the old exit sold on.
+        for name, settings in goLiveSettings():
+            with self.subTest(name):
+                client = FakeBybit(bars=breakingUp())
+                before = runCycle(client, **dict(settings, active_strategies=["breakout"],
+                                                 breakout_exit_lookback=10))
+                self.assertEqual(len(client.created_orders), 1, before.output)
+
+                client.bars = breakingLow()
+                after = runCycle(client, state_dir=before.state_dir,
+                                 **dict(settings, log_detail=True))
+
+                self.assertEqual(after.exit_code, 0, after.output)
+                self.assertEqual(len(client.created_orders), 1, after.output)
+                self.assertIn("owner unknown ('breakout'), falling back to "
+                              "UNKNOWN_OWNER_EXIT=regime", after.output)
 
 
 # A strategy trading both sides for real. Leverage 5 as in `risk`, so the

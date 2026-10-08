@@ -14,12 +14,16 @@ captured at notify.push and never leave the process.
 """
 
 import contextlib
+import importlib.util
 import io
 import os
+import sys
 import tempfile
 import time
 import types
 from unittest import mock
+
+from dotenv import dotenv_values
 
 import config
 import main
@@ -406,3 +410,27 @@ def runCycle(client, state_dir=None, environ=None, **settings):
 
     return types.SimpleNamespace(exit_code=exit_code, output=output.getvalue(),
                                  pushes=pushes, state_dir=state_dir)
+
+
+# What a cycle needs that a checkout cannot supply: the keys, and the topic.
+pinned_secrets = ("bybit_api_key", "bybit_api_secret", "ntfy_topic")
+
+
+def settingsFrom(environ):
+    """Every setting runCycle pins, as config.py parses them from `environ`
+    alone - no .env file and none of this laptop's variables. {} gives the
+    code's own defaults. The secrets keep the harness's values."""
+    spec = importlib.util.spec_from_file_location("config_from_environ", config.__file__)
+    module = importlib.util.module_from_spec(spec)
+    no_dotenv = types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: False)
+    with mock.patch.dict(os.environ, environ, clear=True), \
+            mock.patch.dict(sys.modules, {"dotenv": no_dotenv}):
+        spec.loader.exec_module(module)
+    return {name: getattr(module, name) for name in baseline if name not in pinned_secrets}
+
+
+def controlPanel():
+    """.env.example as an environment, read the way config.py reads it once
+    copied to .env."""
+    path = os.path.join(os.path.dirname(config.__file__), ".env.example")
+    return {name: value or "" for name, value in dotenv_values(path).items()}
