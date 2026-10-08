@@ -66,16 +66,15 @@ class ReasonsToldOnTheRealChart(unittest.TestCase):
         self.assertEqual(signals.words(text, signals.short),
                          "close broke below the 20-bar low (close=1990.000000 level=2000.000000)")
 
-    def testAShortReasonSwapsMovesAndDirectionalIndicators(self):
-        text = "exit: close fell below the low, bullish, +DI=30.0 -DI=10.0, higher highs"
+    def testAShortReasonSwapsMovesAndDirections(self):
+        text = "exit: close fell below the low, bullish, buy-side, higher highs"
         self.assertEqual(signals.words(text, signals.short),
-                         "exit: close rose above the high, bearish, -DI=30.0 +DI=10.0, "
-                         "lower lows")
+                         "exit: close rose above the high, bearish, sell-side, lower lows")
 
     def testWordsInsideOtherWordsAreNotTouched(self):
         # "below" must not turn "lowest-ish" or "shadow" into nonsense.
-        self.assertEqual(signals.words("shadow of EMA20-EMA50, 3 bar(s)", signals.short),
-                         "shadow of EMA20-EMA50, 3 bar(s)")
+        self.assertEqual(signals.words("shadow of a lowest-ish bar, 3 bar(s)", signals.short),
+                         "shadow of a lowest-ish bar, 3 bar(s)")
 
     def testTheMirroredRegimeSentenceReadsAsAShort(self):
         # Price -1999 against a line at -2000 is price 1999 against 2000.

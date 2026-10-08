@@ -15,8 +15,7 @@ import time
 import unittest
 
 from fake_bybit import (FakeBybit, breakingDown, breakingUp, candles, heldPosition, ictLong,
-                        ictLongGapBeforeShift, ictShort, risingRun, runCycle, series,
-                        trendDown, trendUp)
+                        ictLongGapBeforeShift, ictShort, risingRun, runCycle, series)
 
 # 3 ATR stop, 6 ATR target, and leverage low enough that the liquidation cap
 # (half of 1/5 of the price, 200 at 2000) stays out of the way of a 60 stop.
@@ -59,10 +58,10 @@ class ForcedEntry(unittest.TestCase):
         cycle = runCycle(client, force_entry=True, **risk)
 
         # In the order id Bybit shows in its own UI, and on the phone.
-        self.assertIn("-t-", client.created_orders[0]["params"]["orderLinkId"])
+        self.assertIn("-i-", client.created_orders[0]["params"]["orderLinkId"])
         opened = [push for push in cycle.pushes if push["title"] == "Opened ETH/USDT:USDT"]
         self.assertEqual(len(opened), 1, cycle.pushes)
-        self.assertIn("strategy trend", opened[0]["message"])
+        self.assertIn("strategy ict", opened[0]["message"])
 
     def testTheSideIsOnThePhone(self):
         client = FakeBybit(bars=candles(**flat_2000))
@@ -596,30 +595,6 @@ class Shorts(unittest.TestCase):
                       openedPushes(cycle)[0]["message"])
         self.assertIn("OPENED ETH/USDT:USDT short qty=", cycle.output)
 
-    def testATrendShortIsTheTrendLongMirrored(self):
-        # trendUp() buys at 2106 with ATR 20: stop 2046, target 2226. Turned
-        # upside down around 4000 it sells at 1894: stop 1954, target 1774.
-        up = FakeBybit(bars=trendUp())
-        down = FakeBybit(bars=trendDown())
-        settings = dict(active_strategies=["trend"], short_strategies=["trend"], **both_sides)
-
-        long_cycle = runCycle(up, **settings)
-        short_cycle = runCycle(down, **settings)
-
-        for client, cycle in ((up, long_cycle), (down, short_cycle)):
-            self.assertEqual(cycle.exit_code, 0, cycle.output)
-            self.assertEqual(len(client.created_orders), 1, cycle.output)
-            self.assertIn("-t-", client.created_orders[0]["params"]["orderLinkId"])
-        bought, sold = up.created_orders[0], down.created_orders[0]
-        self.assertEqual(bought["side"], "buy")
-        self.assertEqual(bought["params"]["stopLoss"]["triggerPrice"], 2046.0)
-        self.assertEqual(bought["params"]["takeProfit"]["triggerPrice"], 2226.0)
-        self.assertEqual(sold["side"], "sell")
-        self.assertEqual(sold["params"]["stopLoss"]["triggerPrice"], 1954.0)
-        self.assertEqual(sold["params"]["takeProfit"]["triggerPrice"], 1774.0)
-        self.assertIn("why: trend: EMA20 crossed below EMA50",
-                      openedPushes(short_cycle)[0]["message"])
-
     def testAHeldBreakoutShortIsClosedByAReduceOnlyBuyOnACloseAboveTheTenBarHigh(self):
         client = FakeBybit(bars=breakingDown())
         settings = dict(active_strategies=["breakout"], short_strategies=["breakout"],
@@ -885,8 +860,8 @@ class ReentryCooldown(unittest.TestCase):
         # still inside three hourly candles.
         client = FakeBybit(bars=candles(**flat_2000), closed=[closedMinutesAgo(50)])
 
-        cycle = runCycle(client, force_entry=True, active_strategies=["trend"],
-                         strategy_timeframes={"trend": "1h"}, **cooldown, **risk)
+        cycle = runCycle(client, force_entry=True, active_strategies=["breakout"],
+                         strategy_timeframes={"breakout": "1h"}, **cooldown, **risk)
 
         self.assertEqual(cycle.exit_code, 0, cycle.output)
         self.assertEqual(client.created_orders, [], cycle.output)
@@ -894,8 +869,8 @@ class ReentryCooldown(unittest.TestCase):
 
     def testTheCloseHistoryIsReadAsFarBackAsTheLongestCooldown(self):
         # 3 hourly candles reach further back than CLOSED_LOOKBACK_MINUTES.
-        cycle = runCycle(FakeBybit(), active_strategies=["trend"],
-                         strategy_timeframes={"trend": "1h"}, closed_lookback_minutes=15,
+        cycle = runCycle(FakeBybit(), active_strategies=["breakout"],
+                         strategy_timeframes={"breakout": "1h"}, closed_lookback_minutes=15,
                          **cooldown)
 
         self.assertIn("closed-position check: 0 record(s) in the last 180 minute(s)",
@@ -983,7 +958,7 @@ class ConfigurationWarnings(unittest.TestCase):
     def testMixedClocksWithoutPerStrategyCapsAreWarnedAbout(self):
         # A 15-minute rule fires far more often than an hourly one and takes
         # every slot first unless the strategies are budgeted separately.
-        cycle = runCycle(FakeBybit(), strategy_timeframes={"trend": "1h"},
+        cycle = runCycle(FakeBybit(), strategy_timeframes={"breakout": "1h"},
                          max_open_per_strategy={})
 
         self.assertEqual(cycle.exit_code, 0, cycle.output)
@@ -1053,6 +1028,26 @@ class ConfigurationWarnings(unittest.TestCase):
 
             self.assertEqual(cycle.exit_code, 1, cycle.output)
             self.assertIn("contains unknown 'pullback'", cycle.output)
+            self.assertEqual(client.created_orders, [])
+
+    def testTheSettingsOfTheRemovedTrendAreWarnedAbout(self):
+        names = ("EMA_FAST_PERIOD", "EMA_SLOW_PERIOD", "ADX_PERIOD", "ADX_MIN")
+        cycle = runCycle(FakeBybit(), environ={name: "20" for name in names})
+
+        self.assertEqual(cycle.exit_code, 0, cycle.output)
+        for name in names:
+            self.assertIn("CONFIG WARNING: %s is set but no longer used - the trend strategy "
+                          "was removed" % name, cycle.output)
+
+    def testTheRemovedTrendIsRefusedOnEitherSide(self):
+        for settings in (dict(active_strategies=["trend"]),
+                         dict(active_strategies=["ict"], short_strategies=["trend"])):
+            client = FakeBybit(bars=ictLong())
+
+            cycle = runCycle(client, dummy_mode=False, leverage=15, **settings)
+
+            self.assertEqual(cycle.exit_code, 1, cycle.output)
+            self.assertIn("contains unknown 'trend'", cycle.output)
             self.assertEqual(client.created_orders, [])
 
 

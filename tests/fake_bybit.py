@@ -42,7 +42,7 @@ baseline = {
     "order_link_prefix": "cf",
     "order_bucket_seconds": 120,
     "strategy": "multi",
-    "active_strategies": ["trend", "breakout"],
+    "active_strategies": ["ict", "breakout"],
     "short_strategies": [],
     "min_entry_votes": 1,
     "max_open_positions": 10,
@@ -64,10 +64,6 @@ baseline = {
     "regime_period": 200,
     "exit_on_regime_break": False,
     "unknown_owner_exit": "regime",
-    "ema_fast_period": 20,
-    "ema_slow_period": 50,
-    "adx_period": 14,
-    "adx_min": 20.0,
     "breakout_lookback": 20,
     "breakout_exit_lookback": 10,
     "ict_swing_bars": 2,
@@ -236,38 +232,6 @@ def ictShort():
     bar the retest. Gap 1990-2010, retest closing at 1986, structure at
     candle 1's high 2022, one draw at 1900, ATR about 13.4."""
     return reflected(ictLong())
-
-
-def trendBar(open_price, body):
-    """A bar opening at `open_price` and closing `body` from it, with
-    (20 - |body|) / 2 of wick either side: its true range is 20 whatever the
-    bar before it did, as long as that bar closed where this one opens."""
-    close = open_price + body
-    wick = (20.0 - abs(body)) / 2.0
-    return (open_price, max(open_price, close) + wick, min(open_price, close) - wick, close)
-
-
-def trendUp():
-    """Candles where EMA20 has just crossed back above EMA50 with ADX about
-    48, above the regime line, ATR exactly 20, last close 2106.
-
-    300 flat bars at 2000, 40 bars climbing 4 a bar to 2160, 24 falling 4 a
-    bar to 2064 (EMA20 drops under EMA50), and 3 climbing 14 a bar: the
-    cross is on the newest closed bar. Every bar's true range is 20.
-    """
-    bars, price = [], 2000.0
-    for count, body in ((300, 0.0), (40, 4.0), (24, -4.0), (3, 14.0)):
-        for _ in range(count):
-            bars.append(trendBar(price, body))
-            price = bars[-1][3]
-    return series(bars)
-
-
-def trendDown():
-    """trendUp() reflected around 4000: EMA20 has just crossed below EMA50
-    with ADX about 48, under the regime line, ATR exactly 20, last close
-    1894."""
-    return reflected(trendUp())
 
 
 def breakingDown(close=2000.0, half_range=10.0):

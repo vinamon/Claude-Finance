@@ -498,7 +498,8 @@ def stopTooTight(targets, atr_value):
 # Tag letters no strategy may take. "c" marks the bot's own close and "x" an
 # order with no strategy. A removed strategy's letter is never reused, so an
 # old order id in Bybit's history is never read as a newer strategy's.
-reserved_tags = {"c": "the bot's close", "x": "no strategy", "p": "pullback, removed"}
+reserved_tags = {"c": "the bot's close", "x": "no strategy", "p": "pullback, removed",
+                 "t": "trend, removed"}
 
 
 def strategyTag(strategy):

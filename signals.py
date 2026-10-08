@@ -12,7 +12,6 @@ touching code. If you find a bare number in a strategy here, it is a bug.
 STRATEGIES, AND THEY CAN ALL RUN AT ONCE
 ----------------------------------------
   ict       sweep of a known low, structure shift, retest of the gap it left
-  trend     EMA fast/slow crossover, confirmed by ADX trend strength
   breakout  Donchian (Turtle) channel breakout, asymmetric exit
 
 Each one is a block: its entry and exit functions, its candle budget, and
@@ -115,8 +114,8 @@ def mirror(candles):
 
     A short is the long rule read on this chart. A close above the 20-bar high
     here is a close below the 20-bar low on the real one, a gap up here is a
-    gap down there, the regime line flips with the price, and ranges - ATR,
-    ADX - are unchanged. So every rule is written once, for longs, and is
+    gap down there, the regime line flips with the price, and ranges - ATR -
+    are unchanged. So every rule is written once, for longs, and is
     exactly mirrored for shorts by construction rather than by a second copy
     that could drift.
     """
@@ -134,9 +133,8 @@ opposites = {"above": "below", "below": "above", "high": "low", "low": "high",
              "highest": "lowest", "lowest": "highest", "up": "down", "down": "up",
              "fell": "rose", "rose": "fell", "falls": "rises", "rises": "falls",
              "bullish": "bearish", "bearish": "bullish", "buy-side": "sell-side",
-             "sell-side": "buy-side", "+DI": "-DI", "-DI": "+DI"}
-opposite_words = re.compile(r"(?<![\w+-])(buy-side|sell-side|[+-]DI|%s)(?![\w-])"
-                            % "|".join(word for word in opposites if word[0].isalpha()))
+             "sell-side": "buy-side"}
+opposite_words = re.compile(r"(?<![\w+-])(%s)(?![\w-])" % "|".join(opposites))
 
 
 def words(text, side):
@@ -186,27 +184,8 @@ def sma(values, period):
     return out
 
 
-def ema(values, period):
-    """Exponential moving average, seeded with the SMA of the first window.
-
-    Seeding with an SMA rather than the first value is what charting packages
-    do; starting from a single price makes the first dozen readings meaningless
-    and would fire crossovers that no chart shows.
-    """
-    out = [None] * len(values)
-    if period <= 0 or len(values) < period:
-        return out
-    multiplier = 2.0 / (period + 1)
-    running = sum(values[:period]) / period
-    out[period - 1] = running
-    for i in range(period, len(values)):
-        running = (values[i] - running) * multiplier + running
-        out[i] = running
-    return out
-
-
 def wilderSmooth(values, period):
-    """Wilder's smoothing, the averaging used by RSI, ATR and ADX.
+    """Wilder's smoothing, the averaging ATR uses.
 
     Seeded with the simple average of the first `period` readings, then
     recursive. `values` may start with None entries (true range has no reading
@@ -253,72 +232,10 @@ def atr(candles, period):
     return wilderSmooth(trueRanges(candles), period)
 
 
-def adx(candles, period):
-    """Wilder's ADX: trend STRENGTH, with no opinion on direction.
-
-    A moving-average crossover system's main weakness is that it fires
-    constantly in a sideways market and loses on every one of those trades.
-    ADX is the standard filter for exactly that: low ADX means the market is
-    ranging and a crossover means nothing.
-
-    Returns (adx, plus_di, minus_di), each aligned to candles.
-    """
-    length = len(candles)
-    empty = [None] * length
-    if period <= 0 or length < 2:
-        return empty, empty, empty
-
-    ranges = trueRanges(candles)
-    plus_dm = [None] * length
-    minus_dm = [None] * length
-
-    for i in range(1, length):
-        up_move = candles[i][2] - candles[i - 1][2]
-        down_move = candles[i - 1][3] - candles[i][3]
-        # Only the larger of the two directional moves counts, and only when
-        # it is positive. A bar that is merely inside the previous one
-        # contributes nothing in either direction.
-        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
-        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
-
-    smoothed_tr = wilderSmooth(ranges, period)
-    smoothed_plus = wilderSmooth(plus_dm, period)
-    smoothed_minus = wilderSmooth(minus_dm, period)
-
-    plus_di = [None] * length
-    minus_di = [None] * length
-    dx = [None] * length
-
-    for i in range(length):
-        if smoothed_tr[i] in (None, 0) or smoothed_plus[i] is None or smoothed_minus[i] is None:
-            continue
-        plus_di[i] = 100.0 * smoothed_plus[i] / smoothed_tr[i]
-        minus_di[i] = 100.0 * smoothed_minus[i] / smoothed_tr[i]
-        total = plus_di[i] + minus_di[i]
-        dx[i] = 0.0 if total == 0 else 100.0 * abs(plus_di[i] - minus_di[i]) / total
-
-    return wilderSmooth(dx, period), plus_di, minus_di
-
-
-def crossedAbove(fast, slow, index):
-    """True if fast crossed from at-or-below to above slow at `index`."""
-    if index < 1:
-        return False
-    prev_fast, prev_slow = fast[index - 1], slow[index - 1]
-    now_fast, now_slow = fast[index], slow[index]
-    if None in (prev_fast, prev_slow, now_fast, now_slow):
-        return False
-    return prev_fast <= prev_slow and now_fast > now_slow
-
-
 def lookbackRange(length, bars):
     """Indices of the last `bars` closed candles, newest last."""
     start = max(1, length - max(1, bars))
     return range(start, length)
-
-
-def formatValue(value):
-    return "n/a" if value is None else ("%.4f" % value)
 
 
 # ---------------------------------------------------------------------------
@@ -760,111 +677,6 @@ def ictExit(candles):
 
 
 # ---------------------------------------------------------------------------
-# trend - EMA crossover confirmed by ADX
-#
-# The most-traded system there is, plus the standard fix for its worst flaw.
-# A bare moving-average crossover bleeds in sideways markets because it fires
-# on every wiggle; requiring ADX above a floor means "only take the crossover
-# when something is actually trending".
-#
-# EMA rather than SMA, and shorter periods than the classic 50/200, because
-# 50/200 is a daily-chart signal. On an intraday timeframe it fires once in
-# months. EMA_FAST_PERIOD / EMA_SLOW_PERIOD set the speed.
-# ---------------------------------------------------------------------------
-
-
-def trendEntry(candles):
-    price = closes(candles)
-    need = config.ema_slow_period + config.signal_lookback_bars + 2
-    if len(price) < need:
-        return Decision(hold, "trend: need %d closed candles, have %d" % (need, len(price)),
-                        "trend")
-
-    fast = ema(price, config.ema_fast_period)
-    slow = ema(price, config.ema_slow_period)
-    strength, plus_di, minus_di = adx(candles, config.adx_period)
-
-    for i in lookbackRange(len(price), config.signal_lookback_bars):
-        if not crossedAbove(fast, slow, i):
-            continue
-        if fast[-1] is None or slow[-1] is None or fast[-1] <= slow[-1]:
-            continue
-
-        bars_ago = len(price) - 1 - i
-        if config.adx_min > 0:
-            if strength[-1] is None:
-                return Decision(
-                    hold,
-                    "trend: EMA%d crossed above EMA%d %d bar(s) ago but ADX%d is not "
-                    "seeded yet" % (config.ema_fast_period, config.ema_slow_period,
-                                    bars_ago, config.adx_period),
-                    "trend",
-                )
-            if strength[-1] < config.adx_min:
-                return Decision(
-                    hold,
-                    "trend: EMA%d crossed above EMA%d %d bar(s) ago but ADX%d is %.1f, "
-                    "under the %.1f floor - the market is ranging, not trending"
-                    % (config.ema_fast_period, config.ema_slow_period, bars_ago,
-                       config.adx_period, strength[-1], config.adx_min),
-                    "trend",
-                )
-
-        return Decision(
-            enter,
-            "trend: EMA%d crossed above EMA%d %d bar(s) ago and is still above "
-            "(fast=%.6f slow=%.6f, ADX%d=%s +DI=%s -DI=%s)"
-            % (config.ema_fast_period, config.ema_slow_period, bars_ago, fast[-1], slow[-1],
-               config.adx_period, formatValue(strength[-1]), formatValue(plus_di[-1]),
-               formatValue(minus_di[-1])),
-            "trend",
-        )
-
-    return Decision(
-        hold,
-        "trend: no EMA%d/EMA%d cross up in the last %d closed bar(s) (fast=%s slow=%s ADX%d=%s)"
-        % (config.ema_fast_period, config.ema_slow_period, config.signal_lookback_bars,
-           formatValue(fast[-1]), formatValue(slow[-1]), config.adx_period,
-           formatValue(strength[-1])),
-        "trend",
-    )
-
-
-def trendCandles():
-    """Closed candles trend needs: the slow EMA and ADX are recursive and only
-    settle after several times their period."""
-    return max(config.ema_slow_period * config.warmup_multiplier,
-               config.adx_period * config.warmup_multiplier * 2) + config.signal_lookback_bars + 5
-
-
-def trendExit(candles):
-    price = closes(candles)
-    need = config.ema_slow_period + 1
-    if len(price) < need:
-        return Decision(hold, "trend exit: need %d closed candles, have %d" % (need, len(price)),
-                        "trend")
-
-    fast = ema(price, config.ema_fast_period)
-    slow = ema(price, config.ema_slow_period)
-    if fast[-1] is None or slow[-1] is None:
-        return Decision(hold, "trend exit: moving averages not seeded yet", "trend")
-
-    if fast[-1] < slow[-1]:
-        return Decision(
-            close,
-            "trend exit: EMA%d is below EMA%d (fast=%.6f slow=%.6f)"
-            % (config.ema_fast_period, config.ema_slow_period, fast[-1], slow[-1]),
-            "trend",
-        )
-    return Decision(
-        hold,
-        "trend exit: EMA%d still above EMA%d (fast=%.6f slow=%.6f)"
-        % (config.ema_fast_period, config.ema_slow_period, fast[-1], slow[-1]),
-        "trend",
-    )
-
-
-# ---------------------------------------------------------------------------
 # breakout - Donchian channel, Turtle style
 #
 # Buy a close above the highest high of the previous N bars; leave on a close
@@ -967,7 +779,6 @@ Strategy = namedtuple("Strategy", "entry exit candles brackets_only", defaults=(
 
 strategies = {
     "ict": Strategy(ictEntry, ictExit, ictCandles, brackets_only=True),
-    "trend": Strategy(trendEntry, trendExit, trendCandles),
     "breakout": Strategy(breakoutEntry, breakoutExit, breakoutCandles),
 }
 
@@ -990,9 +801,9 @@ def strategyTimeframe(name):
     """The candle size this strategy is evaluated on.
 
     STRATEGY_TIMEFRAMES overrides ENTRY_TIMEFRAME per strategy, which is what
-    lets one bot hold a swing book and a scalping book at once - say a trend
-    rule on hourly candles beside the rest on 15-minute ones, in the same
-    cycle, against the same account. Empty by default: one clock for all.
+    lets one bot hold a swing book and a scalping book at once - say breakout
+    on hourly candles beside the rest on 15-minute ones, in the same cycle,
+    against the same account. Empty by default: one clock for all.
     """
     return config.strategy_timeframes.get(name, config.entry_timeframe)
 
@@ -1000,9 +811,9 @@ def strategyTimeframe(name):
 def requiredTimeframes():
     """Map of timeframe to how many candles to fetch, for everything active.
 
-    One entry per DISTINCT timeframe, not per strategy, so four strategies
-    sharing the 15-minute chart cost one request rather than four. The count
-    is the largest any strategy on that timeframe needs.
+    One entry per DISTINCT timeframe, not per strategy, so strategies sharing
+    the 15-minute chart cost one request rather than one each. The count is
+    the largest any strategy on that timeframe needs.
     """
     wanted = {}
     for name in activeStrategies():
@@ -1177,8 +988,8 @@ def exitSignal(symbol, candles_by_timeframe, owner=None, side=long):
 
     The owner is the strategy that opened this position, remembered from the
     entry. Its exit rule is the one that applies, read on its own timeframe:
-    closing a 15-minute mean-reversion trade with an hourly trend rule, or the
-    reverse, is how a multi-strategy bot destroys both strategies at once.
+    closing a 15-minute trade with an hourly rule, or the reverse, is how a
+    multi-strategy bot destroys both strategies at once.
 
     If the owner is unknown - a position opened by hand, or state lost - the
     fallback is config.unknown_owner_exit: "any" closes as soon as any active

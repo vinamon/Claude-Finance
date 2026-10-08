@@ -226,7 +226,7 @@ symbols = envList(
 
 # Every strategy the bot has, in the order the documentation lists them. A
 # name outside this list is refused by validate().
-strategy_names = ("ict", "trend", "breakout")
+strategy_names = ("ict", "breakout")
 
 # One of strategy_names, or "multi" to run several at once.
 strategy = envStr("STRATEGY", "multi")
@@ -252,8 +252,8 @@ short_strategies = envList("SHORT_STRATEGIES", [])
 #
 # Empty by default: every strategy trades the same 15-minute clock. The
 # override is what lets one bot hold a swing book and a scalping book at the
-# same time - "trend:1h" would put the trend rule back on hourly candles while
-# the rest stay fast.
+# same time - "breakout:1h" would put breakout on hourly candles while the
+# rest stay fast.
 strategy_timeframes = envMap("STRATEGY_TIMEFRAMES", {})
 
 # Per-strategy ceiling on open positions, as "name:count". A strategy not
@@ -361,25 +361,6 @@ exit_on_regime_break = envBool("EXIT_ON_REGIME_BREAK", False)
 # "any" closed an orphaned position within a cycle and paid the fees for
 # nothing. Its stop and target are already on the exchange.
 unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "regime")
-
-# ---------------------------------------------------------------------------
-# trend - EMA crossover confirmed by ADX
-# ---------------------------------------------------------------------------
-
-# Shorter and exponential rather than the classic SMA 50/200, which is a
-# DAILY-chart signal: on an intraday timeframe 50/200 fires once in months.
-# On the 15-minute clock 20/50 is about five hours against twelve - a
-# crossing that happens a few times a day on an active market, which is the
-# point of a fast book. ADX below keeps the ones in a sideways market out.
-ema_fast_period = envInt("EMA_FAST_PERIOD", 20)
-ema_slow_period = envInt("EMA_SLOW_PERIOD", 50)
-
-# ADX measures trend STRENGTH with no opinion on direction. A bare moving
-# average crossover bleeds in sideways markets because it fires on every
-# wiggle; requiring ADX above a floor is the standard fix. Below ~20 is
-# conventionally "no trend". Set ADX_MIN to 0 to disable the filter.
-adx_period = envInt("ADX_PERIOD", 14)
-adx_min = envFloat("ADX_MIN", 20.0)
 
 # ---------------------------------------------------------------------------
 # breakout - Donchian channel, Turtle style
@@ -604,8 +585,8 @@ kill_grace_seconds = envInt("KILL_GRACE_SECONDS", 5)
 # about in validate(), because a stale key in .env that is silently ignored is
 # the kind of thing that costs an afternoon.
 retired_settings = {
-    "SMA_FAST_PERIOD": "replaced by EMA_FAST_PERIOD",
-    "SMA_SLOW_PERIOD": "replaced by EMA_SLOW_PERIOD (REGIME_PERIOD is the slow line now)",
+    "SMA_FAST_PERIOD": "the trend strategy was removed",
+    "SMA_SLOW_PERIOD": "the trend strategy was removed (REGIME_PERIOD is the slow line)",
     "RSI_PERIOD": "the meanrev strategy was removed",
     "RSI_OVERSOLD": "the meanrev strategy was removed",
     "RSI_OVERBOUGHT": "the meanrev strategy was removed",
@@ -614,6 +595,10 @@ retired_settings = {
     "BB_STDEV": "the scalp strategy was removed",
     "BB_LOOKBACK_BARS": "the scalp strategy was removed",
     "PULLBACK_DISPLACEMENT_MIN_ATR": "the pullback strategy was removed",
+    "EMA_FAST_PERIOD": "the trend strategy was removed",
+    "EMA_SLOW_PERIOD": "the trend strategy was removed",
+    "ADX_PERIOD": "the trend strategy was removed",
+    "ADX_MIN": "the trend strategy was removed",
 }
 
 
@@ -765,12 +750,8 @@ def validate():
     if order_bucket_seconds < 1:
         problems.append("ORDER_BUCKET_SECONDS must be >= 1")
 
-    if ema_fast_period >= ema_slow_period:
-        problems.append("EMA_FAST_PERIOD must be smaller than EMA_SLOW_PERIOD")
     if regime_filter and regime_period < 2:
         problems.append("REGIME_PERIOD must be >= 2 while REGIME_FILTER is on")
-    if adx_min < 0:
-        problems.append("ADX_MIN must be >= 0 (0 disables the filter)")
     if signal_lookback_bars < 1:
         problems.append("SIGNAL_LOOKBACK_BARS must be >= 1")
     if breakout_lookback < 1:
