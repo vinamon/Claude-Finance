@@ -16,8 +16,9 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
   DOGE, 1000PEPE and BCH. This is a demo account.
 - **Direction:** long, and short for the strategies named in
   `SHORT_STRATEGIES=ict` (ict trades both sides). A short is the exact mirror
-  of the long rule; see "Shorts" below. A short already held, opened by the
-  bot or by hand, is judged by the mirror of the exit rule.
+  of the long rule; see "Shorts" below. A held short is judged on the
+  mirrored chart: by its owner's exit rule, mirrored, when the owner is a
+  live strategy, otherwise by `UNKNOWN_OWNER_EXIT`.
 - **Clock:** 15-minute candles (`ENTRY_TIMEFRAME=15m`) for every strategy.
   Exits read the same timeframe.
 - **Closed candles only.** The candle still forming is dropped before any
@@ -31,23 +32,28 @@ are in `CLAUDE.md` under "Parameter choices". They are not repeated here.
   fired.
 - **Live set:** `ACTIVE_STRATEGIES=ict`, as an experiment through its first
   review (about 100 trades per side). breakout is described below but is not
-  trading: run beside ict it took the symbols ict needed (#21). meanrev,
-  scalp, pullback and trend lost money in the replay and were removed.
+  trading: run beside ict it took the symbols ict needed (#21). meanrev and
+  scalp lost money in the replay of the old setup (988f72f), pullback and
+  trend in the 90-day replay of #21, and all four were removed.
 - **Unknown owner:** `UNKNOWN_OWNER_EXIT=regime`. A position whose strategy
   is unknown or no longer active is left to its exchange-side stop and
-  target.
+  target. A position opened by hand without them is never closed by the bot
+  while `EXIT_ON_REGIME_BREAK=false`.
+  A breakout position still open when breakout is switched off is such a
+  position: it never takes its channel exit (only the regime break would
+  close it, and that is off).
 - **One position per symbol.** The strategy that opened a position owns its
   exit. Only that strategy's exit rule can close it; the exchange-side stops
   can too. A setup for the other side on a symbol already held is ignored
-  (logged as "holding long, short setup ignored"): the bot never flips or
-  fights its own position.
+  (logged as "holding long, short setup ignored" with `LOG_DETAIL=true`): the
+  bot never flips or fights its own position.
 
 ## The regime filter (gates every entry)
 
 A long entry is allowed only when the last close is above the
 `REGIME_PERIOD=200` simple moving average on that strategy's timeframe, a
 short entry only when it is below. That is about two days of 15-minute bars.
-On any bar at most one side of a strategy can pass.
+With the filter on, at most one side of a strategy can pass on any bar.
 
 The filter gates entries only. `EXIT_ON_REGIME_BREAK=false`: a position is
 not closed when price crosses back over the line. Set to true, the break
@@ -84,16 +90,20 @@ asymmetric defaults. The rules below are written for longs; for a short read
 ## ict: sweep, structure shift, retest of the gap
 
 Long side. Every count is in closed 15-minute candles and every size in
-ATR(`ATR_PERIOD=14`) on the same candles. Tag `i` in the order id.
+ATR(`ATR_PERIOD=14`) on the same candles. The gap's size and body use the ATR
+at candle 3; the chase limit, stop buffer, stop floor and minimum-stop check
+use the ATR of the newest closed candle. Tag `i` in the order id.
 
 - **Swings.** A swing high is a high strictly above the `ICT_SWING_BARS=2`
   highs on each side; a swing low the mirror. It exists only once those bars
   have closed.
 - **Sweep, at bar `s`.** A level `L` is taken: a swing low inside the last
   `ICT_LIQUIDITY_LOOKBACK_BARS=96` bars before `s`, confirmed by bar `s−1`, or
-  the previous UTC day's low (counted only when that whole day is in the
-  window). `L` is untouched up to `s−1` (no low under it), `low[s] < L`, and a
-  bar from `s` to `s + ICT_SWEEP_RECLAIM_BARS=1` closes above `L`.
+  the previous UTC day's low (counted only when the candles read cover that
+  whole day; the 96-bar lookback does not apply to it). `L` is untouched up
+  to `s−1` (no low under it; for the day's low, counted from 00:00 UTC of the
+  sweep's day), `low[s] < L`, and a bar from `s` to
+  `s + ICT_SWEEP_RECLAIM_BARS=1` closes above `L`.
 - **Structure shift, at bar `m`.** The first bar from `s` to
   `s + ICT_MSS_MAX_BARS=8` that closes above `H`, the latest swing high before
   `s` that is confirmed by bar `m`. Only the most recent shift counts; two
@@ -124,15 +134,19 @@ ATR(`ATR_PERIOD=14`) on the same candles. Tag `i` in the order id.
   (refusal "capped-stop", `ICT_ALLOW_CAPPED_STOP=false`). Then the shared
   minimum-stop check.
 - **Target.** The nearest level above the live price among the swing highs
-  with index from `s − 96` to the last one confirmed by `s−1` that nothing has
-  traded above since, and the previous UTC day's high while untouched since
-  00:00 UTC. The target is that level. Closer than `ICT_MIN_RR=1.5` × risk: no
+  with index from `s − ICT_LIQUIDITY_LOOKBACK_BARS` to the last one confirmed
+  by `s−1` that no bar has traded above through the newest one, and the high
+  of the UTC day before the sweep bar's day, while nothing from 00:00 UTC of
+  the sweep's day to the newest bar has traded above it. The target is that
+  level. Closer than `ICT_MIN_RR=1.5` × risk: no
   trade (refusal "reward-risk"). No such level: `ICT_FALLBACK_TARGET_R=2.0` ×
   risk.
 - **Exit.** The exchange-side stop and target only. No trail, no rule exit.
   The exit on a bearish structure shift is deferred.
 
 ## breakout: Donchian channel, Turtle style
+
+Long side, switched off (not in `ACTIVE_STRATEGIES`). Tag `b` in the order id.
 
 - **Entry:** a close above the highest high of the previous
   `BREAKOUT_LOOKBACK=20` bars, within the lookback window. The breaking bar
@@ -141,9 +155,10 @@ ATR(`ATR_PERIOD=14`) on the same candles. Tag `i` in the order id.
   to its exchange-side stop and target. On the long side it was the one
   variant of the #21 replay that passed, ahead of a 20-bar and a 10-bar exit.
 - **With a rule exit** (`BREAKOUT_EXIT_LOOKBACK` above 0): a close below the
-  lowest low of that many previous bars, fewer than the entry's. That is the
-  original Turtle asymmetry: a symmetric exit gives back most of the move
-  before admitting the trend is over.
+  lowest low of that many previous bars. Keep it shorter than
+  `BREAKOUT_LOOKBACK`, the original Turtle asymmetry: a symmetric exit gives
+  back most of the move before admitting the trend is over.
+  `config.warnings()` flags an exit lookback longer than the entry's.
 
 ## Risk, applied to every entry
 
@@ -152,16 +167,17 @@ is not running.
 
 - **Sizing:** `POSITION_NOTIONAL_USDT=450` of notional at `LEVERAGE=15`, about
   30 USDT of margin. At most `MAX_OPEN_POSITIONS=10` positions.
-- **Measured from the live price.** The stop, target and trail are measured
-  from the ticker's last trade just before the order, not from the candle
-  close.
+- **Measured from the live price.** The stop and target, and ict's chase
+  limit, are measured from the ticker's last trade just before the order, not
+  from the candle close.
 - **`RISK_MODEL=atr`** for breakout (ict reads its stop and target off the
   chart, see above), with ATR(`ATR_PERIOD=14`) on the entering strategy's
   timeframe:
   - stop: entry − `ATR_STOP_MULT=3.0` × ATR (a short: entry +)
   - target: entry + `ATR_TARGET_MULT=6.0` × ATR (a short: entry −)
-  - no trailing stop: `ATR_TRAIL_MULT=0`. A trail of 1.5 ATR armed at +3 ATR
-    closed most winners well short of the 6 ATR target.
+  - no trailing stop: `ATR_TRAIL_MULT=0` and `TRAILING_STOP_PCT=0`. A trail
+    armed at +3 ATR with a 1.5 ATR distance locks in only +1.5 ATR, and an
+    ordinary 1.5 ATR pullback triggers it. ict never trails.
 - **Liquidation cap.** The stop may sit no further than
   `MAX_STOP_FRACTION_OF_LIQUIDATION=0.5` of the distance to liquidation, about
   3.33% at 15x.
@@ -173,9 +189,15 @@ is not running.
 ## How they relate
 
 `breakout` buys strength, and the regime filter lets it buy only in an
-uptrend. `ict` buys a dip under a known low inside that uptrend,
-once the structure has turned back up. Their short sides, when switched on,
-do the same in a downtrend, below the regime line.
+uptrend. `ict` buys a dip under a known low inside that uptrend, once the
+structure has turned back up. ict's short side does the same in a
+downtrend, below the regime line. breakout's short would sell a close under
+the 20-bar low below the line, but it is not in `SHORT_STRATEGIES` (it lost
+in both halves at every exit setting tried), and breakout itself is off.
 
-They are textbook systems, not a demonstrated edge. In the replay they lost
-in the falling half and won in the rising one (see `CLAUDE.md`).
+Neither is a demonstrated edge. In the 90-day replay of #21 every strategy
+and side failed alone at the defaults of the time (breakout with a 10-bar
+exit); breakout long passed only without a rule exit, the default since
+3e8c699, and thinly. Both halves of that window rose, so no verdict has yet
+faced a falling market. ict trades as an experiment, to be judged on its live
+trades after about 100 per side (see `CLAUDE.md`, "Parameter choices").
