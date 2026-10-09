@@ -385,8 +385,8 @@ unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "regime")
 #
 # 0 by default: no rule exit, the exchange-side stop and target alone close
 # the trade. On the long side it was the one row of the #21 variants that
-# passed: it changed the payoff, not the trade count, and the results ran in
-# order - a 10-bar exit worst, 20 better, none best. A 10-bar exit on
+# passed: it cut trades by about 28%, but the gain is in the payoff of the
+# trades kept, and the results ran in order - a 10-bar exit worst, 20 better, none best. A 10-bar exit on
 # 15-minute candles is 2.5 hours of noise. Measured on a window where both halves rose; expect it to
 # lose in a falling market.
 breakout_lookback = envInt("BREAKOUT_LOOKBACK", 20)
