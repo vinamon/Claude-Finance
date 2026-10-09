@@ -45,8 +45,11 @@ it improves the baseline in both halves. One good half is a market, not an
 edge. An ICT_ setting is kept only when it helps ict long and ict short, each
 in both halves: judged per side and never summed across sides, because in a
 one-directional window anything that cuts the losing side looks good. A
-setting ict shares with breakout (REGIME_PERIOD, SIGNAL_LOOKBACK_BARS, ATR_*)
-must in addition make breakout long worse in neither half. Otherwise the
+setting both strategies read (REGIME_PERIOD, REGIME_FILTER,
+SIGNAL_LOOKBACK_BARS, ATR_PERIOD, REENTRY_COOLDOWN_BARS, MIN_STOP_ATR_MULT,
+MAX_STOP_FRACTION_OF_LIQUIDATION, LEVERAGE, ENTRY_TIMEFRAME) must in addition
+make breakout long worse in neither half. A breakout-only setting (BREAKOUT_*,
+ATR_STOP_MULT, ATR_TARGET_MULT) is judged on breakout long alone. Otherwise the
 default stays.
 
 Candles are cached under state/candles/, which is gitignored. --offline uses
