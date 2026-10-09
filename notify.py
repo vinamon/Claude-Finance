@@ -60,7 +60,7 @@ def push(title, message, priority="default", tags=None):
 
 def positionOpened(result):
     lines = [
-        "qty %s @ %.6f" % (result["qty"], result["price"]),
+        "%s qty %s @ %.6f" % (result["side"], result["qty"], result["price"]),
         "notional %.2f USDT" % result["notional"],
     ]
     if result.get("strategy"):

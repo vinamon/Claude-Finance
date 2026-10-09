@@ -6,7 +6,8 @@ Shape of a run:
   2. read Bybit's closed-position records once, report the new ones with
      why each closed, and keep their times for the re-entry cooldown
   3. read what is actually held, in ONE request, before deciding anything
-  4. for each symbol holding a position: check the owning strategy exit rule
+  4. for each symbol holding a position: check the owning strategy exit rule,
+     and log a setup for the other side as ignored (no flips)
   5. for each symbol holding nothing: collect every active strategy vote,
      then check the position caps and the re-entry cooldown
   6. log every decision and why, then exit 0, or exit 1 on a real failure
@@ -424,12 +425,23 @@ def fetchCandles(client, symbol, wanted):
 def handleHeld(client, symbol, position, owners):
     """A symbol we are holding: ask the owning strategy whether to let go."""
     size = executor.positionSize(position)
+    side = executor.positionSide(position)
     owner = owners.get(symbol)
-    log("%s: holding %s contracts, opened by %s, checking its exit rule"
-        % (symbol, size, owner or "an unknown rule"))
+    log("%s: holding %s %s contracts, opened by %s, checking its exit rule"
+        % (symbol, side, size, owner or "an unknown rule"))
 
-    candles = fetchCandles(client, symbol, signals.exitTimeframes(owner))
-    decision = signals.exitSignal(symbol, candles, owner)
+    # A setup for the other side is read below only when that side can open,
+    # and then one request per timeframe serves both questions. In dummy mode
+    # the entry rules ignore the market and --force-entry forces an "enter"
+    # that is no setup at all, so there is nothing to read.
+    opposite = signals.short if side == signals.long else signals.long
+    read_opposite = not config.dummy_mode and signals.sideCanOpen(opposite)
+    wanted = signals.exitTimeframes(owner)
+    if read_opposite:
+        for timeframe, limit in signals.requiredTimeframes().items():
+            wanted[timeframe] = max(wanted.get(timeframe, 0), limit)
+    candles = fetchCandles(client, symbol, wanted)
+    decision = signals.exitSignal(symbol, candles, owner, side)
 
     if decision.action == signals.close:
         result = executor.closePosition(client, symbol, position, decision.reason, log)
@@ -442,6 +454,15 @@ def handleHeld(client, symbol, position, owners):
         return result
 
     log("%s: staying in - %s" % (symbol, decision.reason))
+
+    # One position per symbol, so a setup for the other side is never acted
+    # on: the bot does not flip or fight its own position. It is logged so
+    # the strategy can still be judged on what it saw.
+    if read_opposite:
+        setup = signals.entrySignal(symbol, candles)
+        if setup.action == signals.enter and setup.side != side:
+            log("%s: holding %s, %s setup ignored - %s"
+                % (symbol, side, setup.side, setup.reason))
     return {"held": True, "reason": decision.reason}
 
 
@@ -458,7 +479,7 @@ def handleFlat(client, symbol, owners, open_total, counts, close_times):
 
     decision = signals.entrySignal(symbol, candles)
 
-    if decision.action != signals.buy:
+    if decision.action != signals.enter:
         log("%s: no entry - %s" % (symbol, decision.reason))
         return {"opened": False, "reason": decision.reason}
 
@@ -498,9 +519,10 @@ def handleFlat(client, symbol, owners, open_total, counts, close_times):
         client, symbol, decision, last_close, log, signals.atrValue(candles.get(timeframe) or [])
     )
     if result.get("opened"):
-        say("OPENED %s long qty=%s @~%.6f  %.2f USDT at %sx  sl=%s tp=%s  (%s)"
-            % (symbol, result["qty"], result["price"], result["notional"], config.leverage,
-               result["stop_loss"], result["take_profit"], result["strategy"]))
+        say("OPENED %s %s qty=%s @~%.6f  %.2f USDT at %sx  sl=%s tp=%s  (%s)"
+            % (symbol, result["side"], result["qty"], result["price"], result["notional"],
+               config.leverage, result["stop_loss"], result["take_profit"],
+               result["strategy"]))
         if result["trailing_distance"] is not None and not result["trailing_set"]:
             say("WARNING %s: trailing stop not set, the stop loss still protects it" % symbol)
         owners[symbol] = result.get("strategy")
@@ -526,11 +548,12 @@ def run():
     live = signals.activeStrategies()
     books = ", ".join("%s@%s" % (name, signals.strategyTimeframe(name)) for name in live)
     log(
-        "start: strategy=%s (%s) votes=%d/%d regime=%s risk=%s dummy_mode=%s "
+        "start: strategy=%s (%s) shorts=%s votes=%d/%d regime=%s risk=%s dummy_mode=%s "
         "trigger=%s symbols=%d max_open=%s"
         % (
             config.strategy,
             books or "none",
+            ",".join(signals.shortStrategies()) or "none",
             config.min_entry_votes,
             len(live),
             ("SMA%d" % config.regime_period) if config.regime_filter else "off",

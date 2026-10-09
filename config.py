@@ -112,6 +112,27 @@ def envMap(name, default, cast=str):
     return parsed
 
 
+def parseKillZones(text):
+    """"HH:MM-HH:MM,HH:MM-HH:MM" as [(start, end)] in minutes of the day, or
+    None for "off". A window whose end is earlier than its start runs past
+    midnight. Raises ValueError on anything else; validate() reports it."""
+    if (text or "").strip().lower() == "off":
+        return None
+    windows = []
+    for item in text.split(","):
+        start, _, end = item.strip().partition("-")
+        minutes = []
+        for clock in (start, end):
+            hours, _, mins = clock.strip().partition(":")
+            if not (hours.isdigit() and mins.isdigit()) or int(hours) > 23 or int(mins) > 59:
+                raise ValueError("%r is not HH:MM-HH:MM" % item.strip())
+            minutes.append(int(hours) * 60 + int(mins))
+        if minutes[0] == minutes[1]:
+            raise ValueError("%r is an empty window" % item.strip())
+        windows.append(tuple(minutes))
+    return windows
+
+
 # ---------------------------------------------------------------------------
 # secrets - never hardcode, never log
 # ---------------------------------------------------------------------------
@@ -203,32 +224,59 @@ symbols = envList(
     ],
 )
 
-# "trend", "meanrev", "breakout", or "multi" to run several at once.
+# Every strategy the bot has, in the order the documentation lists them. A
+# name outside this list is refused by validate().
+strategy_names = ("ict", "breakout")
+
+# One of strategy_names, or "multi" to run several at once.
 strategy = envStr("STRATEGY", "multi")
 
 # Which strategies are live when STRATEGY=multi, in PRIORITY order. When more
 # than one fires on the same bar the first listed owns the position, and its
 # exit rule is what will close it. Ignored unless STRATEGY=multi.
-active_strategies = envList("ACTIVE_STRATEGIES", ["trend", "breakout", "meanrev", "scalp"])
+#
+# ict alone, as an experiment rather than for profit. In the 90-day replay
+# (#21) every baseline row failed, each strategy on each side, and both halves
+# of that window rose, so every verdict so far means "two rising markets".
+# ict runs at its defaults through its first review, about 100 trades per side
+# (some three months), at an expected cost of about 100 USDT of demo money a
+# month. breakout stays off: its long side with no rule exit was the one row
+# that passed, thinly, but run beside ict it held most symbols and ict long
+# fell from 111 trades to 15.
+active_strategies = envList("ACTIVE_STRATEGIES", ["ict"])
+
+# Which of the live strategies may also trade short, as a comma list. Empty
+# means long only. A short is the exact mirror of the strategy's long rule,
+# read on the chart turned upside down, with no separate settings: it enters
+# only below the regime line, where the long side may not. A side that fails
+# the replay is left out of this list without touching its long side.
+#
+# ict, so both of its sides get a verdict at its review. breakout short lost
+# in both halves of the replay and stays out.
+short_strategies = envList("SHORT_STRATEGIES", ["ict"])
 
 # Per-strategy timeframe override, as "name:timeframe,name:timeframe".
 # Anything not listed runs on ENTRY_TIMEFRAME.
 #
 # Empty by default: every strategy trades the same 15-minute clock. The
 # override is what lets one bot hold a swing book and a scalping book at the
-# same time - "trend:1h" would put the trend rule back on hourly candles while
-# the rest stay fast.
+# same time - "breakout:1h" would put breakout on hourly candles while the
+# rest stay fast.
 strategy_timeframes = envMap("STRATEGY_TIMEFRAMES", {})
 
 # Per-strategy ceiling on open positions, as "name:count". A strategy not
 # listed is limited only by MAX_OPEN_POSITIONS.
 #
-# Empty by default, because it only matters when strategies run on different
-# clocks. A 15-minute rule fires many times more often than an hourly one, so
-# with mixed timeframes it reaches every free slot first and the slow rules
-# never get to trade; budgeting them separately fixes that. With every rule on
-# the same clock there is nothing to protect, and a cap only turns signals
-# away.
+# One position per symbol means a strategy holding a symbol blocks every
+# other strategy on it, on one clock as much as on several: with ten symbols
+# and MAX_OPEN_POSITIONS=10 the symbols run out, not the slots. Measured in the
+# replay of ict and breakout together (#21): breakout long held most symbols
+# most of the time and ict long fell from 111 trades to 15. Mixed timeframes
+# make it worse, as the faster rule reaches every free symbol first.
+#
+# Empty by default: with ict alone live, a cap only turns its own signals
+# away. "breakout:4" beside ict should limit the blocking; that is not
+# measured, as the replay plays each symbol on its own.
 max_open_per_strategy = envMap("MAX_OPEN_PER_STRATEGY", {}, int)
 
 # How many active strategies must agree before a position opens. 1 is "any
@@ -298,92 +346,124 @@ signal_lookback_bars = envInt("SIGNAL_LOOKBACK_BARS", 3)
 # regime filter - the gate every strategy passes through
 # ---------------------------------------------------------------------------
 
-# Long entries only while price is above this average. This is what lets a
-# mean-reversion rule and a trend-following rule coexist: mean reversion
-# becomes "buy the dip inside an uptrend" instead of "catch the falling
-# knife". Turning it off makes the strategies fight each other.
+# Long entries only while price is above this average, short entries (see
+# SHORT_STRATEGIES) only while it is below, so every strategy trades with the
+# slow trend rather than against it, and a long and a short never compete for
+# one symbol.
 regime_filter = envBool("REGIME_FILTER", True)
 regime_period = envInt("REGIME_PERIOD", 200)
 
-# Close any open position, whichever strategy opened it, when price falls back
-# under the regime average.
+# Close an open position, whichever strategy opened it, when price falls back
+# under the regime average - except one opened by a strategy that closes at its
+# exchange-side stop and target only (ict; see signals.strategies).
 #
 # Off by default. Replayed on 15-minute candles over 26 days on ten symbols,
-# turning it off improved results in both halves of the sample: the dip
-# buyers (meanrev, scalp) enter precisely when price sags toward that line, so
-# this exit mostly closed trades that were about to work. Every position
-# already carries an exchange-side stop loss, which is the real protection.
+# turning it off improved results in both halves of the sample: a dip inside
+# an uptrend is exactly what sags toward that line, so this exit mostly
+# closed trades that were about to work. Every position already carries an
+# exchange-side stop loss, which is the real protection.
 exit_on_regime_break = envBool("EXIT_ON_REGIME_BREAK", False)
 
 # What to do about a position whose owning strategy is unknown - opened by
-# hand, or the owner file was lost. "any" closes as soon as any active
-# strategy wants out, "all" waits for unanimity, "regime" leaves it to the
-# regime break and the exchange-side stops.
-unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "any")
-
-# ---------------------------------------------------------------------------
-# strategy 1: trend - EMA crossover confirmed by ADX
-# ---------------------------------------------------------------------------
-
-# Shorter and exponential rather than the classic SMA 50/200, which is a
-# DAILY-chart signal: on an intraday timeframe 50/200 fires once in months.
-# On the 15-minute clock 20/50 is about five hours against twelve - a
-# crossing that happens a few times a day on an active market, which is the
-# point of a fast book. ADX below keeps the ones in a sideways market out.
-ema_fast_period = envInt("EMA_FAST_PERIOD", 20)
-ema_slow_period = envInt("EMA_SLOW_PERIOD", 50)
-
-# ADX measures trend STRENGTH with no opinion on direction. A bare moving
-# average crossover bleeds in sideways markets because it fires on every
-# wiggle; requiring ADX above a floor is the standard fix. Below ~20 is
-# conventionally "no trend". Set ADX_MIN to 0 to disable the filter.
-adx_period = envInt("ADX_PERIOD", 14)
-adx_min = envFloat("ADX_MIN", 20.0)
-
-# ---------------------------------------------------------------------------
-# strategy 2: meanrev - short-RSI pullback inside an uptrend
-# ---------------------------------------------------------------------------
-
-# A 2-period RSI, not the usual 14. The short period is what makes this the
-# Connors "RSI-2" pullback pattern rather than a slow oscillator: it collapses
-# into single digits on an ordinary pullback and recovers within a bar or two,
-# which is precisely the move being bought.
-rsi_period = envInt("RSI_PERIOD", 2)
-rsi_oversold = envFloat("RSI_OVERSOLD", 10.0)
-rsi_overbought = envFloat("RSI_OVERBOUGHT", 70.0)
-
-# Connors' own exit: leave when the close snaps back above a short average.
-meanrev_exit_sma_period = envInt("MEANREV_EXIT_SMA_PERIOD", 5)
-
-# ---------------------------------------------------------------------------
-# strategy 3: breakout - Donchian channel, Turtle style
-# ---------------------------------------------------------------------------
-
-# Enter on a close above the N-bar high, leave on a close below the M-bar low,
-# M shorter than N. The asymmetry is the original Turtle rule: a symmetric
-# channel gives back most of a move before admitting the trend is over.
-breakout_lookback = envInt("BREAKOUT_LOOKBACK", 20)
-breakout_exit_lookback = envInt("BREAKOUT_EXIT_LOOKBACK", 10)
-
-# ---------------------------------------------------------------------------
-# strategy 4: scalp - Bollinger Band reversion, on a fast timeframe
-# ---------------------------------------------------------------------------
-
-# Bollinger's own bands: a moving average with a channel drawn a number of
-# standard deviations either side of it. Buy a close that has been stretched
-# below the lower band, let go when it has snapped back to the middle.
+# hand, the owner file was lost, or its strategy is no longer active. "any"
+# closes as soon as any active strategy wants out, "all" waits for unanimity,
+# "regime" leaves it to the regime break and the exchange-side stops.
 #
-# Standard deviation is a genuinely different measure from anything else here
-# - EMA crossovers, RSI and Donchian channels all read price levels, while
-# this reads how FAR the current move sits outside normal variation for this
-# market. 20 and 2.0 are Bollinger's published defaults.
-bb_period = envInt("BB_PERIOD", 20)
-bb_stdev = envFloat("BB_STDEV", 2.0)
+# "regime": at any moment one of several exit rules usually says close, so
+# "any" closed an orphaned position within a cycle and paid the fees for
+# nothing. Its stop and target are already on the exchange.
+unknown_owner_exit = envStr("UNKNOWN_OWNER_EXIT", "regime")
 
-# How far back to look for the stretch. Kept short on purpose: on a 15-minute
-# chart a touch of the lower band resolves within a bar or two, so a wide
-# window would re-enter on a move that has already played out.
-bb_lookback_bars = envInt("BB_LOOKBACK_BARS", 2)
+# ---------------------------------------------------------------------------
+# breakout - Donchian channel, Turtle style
+# ---------------------------------------------------------------------------
+
+# Enter on a close above the N-bar high. With an exit lookback M above 0,
+# leave on a close below the M-bar low, M shorter than N: the original Turtle
+# rule, as a symmetric channel gives back most of a move before admitting the
+# trend is over.
+#
+# 0 by default: no rule exit, the exchange-side stop and target alone close
+# the trade. On the long side it was the one row of the #21 variants that
+# passed: it changed the payoff, not the trade count, and the results ran in
+# order - a 10-bar exit worst, 20 better, none best. A 10-bar exit on
+# 15-minute candles is 2.5 hours of noise. Measured on a window where both halves rose; expect it to
+# lose in a falling market.
+breakout_lookback = envInt("BREAKOUT_LOOKBACK", 20)
+breakout_exit_lookback = envInt("BREAKOUT_EXIT_LOOKBACK", 0)
+
+# ---------------------------------------------------------------------------
+# ict - sweep, structure shift, fair-value gap retest
+#
+# The trader agent's rules (issue #15, "Strategy rules"). Every count is in
+# candles of the strategy's timeframe, every size in ATR on that timeframe.
+# ---------------------------------------------------------------------------
+
+# A swing high is a high strictly above this many bars on each side, a swing
+# low the mirror. It is known only once the bars after it have closed.
+ict_swing_bars = envInt("ICT_SWING_BARS", 2)
+
+# How far back a swing low counts as liquidity worth sweeping: 96 bars is one
+# day of 15-minute candles. The previous UTC day's low counts as well.
+ict_liquidity_lookback_bars = envInt("ICT_LIQUIDITY_LOOKBACK_BARS", 96)
+
+# Bars after the sweeping candle within which a close must come back above the
+# swept level. 0 means the sweeping candle itself must close back above it.
+ict_sweep_reclaim_bars = envInt("ICT_SWEEP_RECLAIM_BARS", 1)
+
+# Bars after the sweep within which a close must break the last swing high,
+# the structure shift. 8 bars is two hours on 15-minute candles.
+ict_mss_max_bars = envInt("ICT_MSS_MAX_BARS", 8)
+
+# The gap's middle candle must close up with a body of at least this many ATR:
+# the move that made the gap was displacement, not drift.
+ict_displacement_min_atr = envFloat("ICT_DISPLACEMENT_MIN_ATR", 1.0)
+
+# The smallest gap worth trading, in ATR. A one-tick gap is smaller than the fee.
+ict_fvg_min_atr = envFloat("ICT_FVG_MIN_ATR", 0.1)
+
+# The retest must come within this many bars of the gap's third candle.
+ict_fvg_max_age_bars = envInt("ICT_FVG_MAX_AGE_BARS", 12)
+
+# The retest candle must close at or above bottom + this fraction of the gap:
+# 0.5 is the gap's midpoint.
+ict_entry_close_min = envFloat("ICT_ENTRY_CLOSE_MIN", 0.5)
+
+# The live price may sit at most this many ATR above the gap's top, and must
+# sit above its bottom. Further away the market order would not fill at the gap.
+ict_max_chase_atr = envFloat("ICT_MAX_CHASE_ATR", 0.5)
+
+# Hours the retest candle must open in, as "HH:MM-HH:MM,..." on the clock of
+# ICT_KILL_ZONE_TZ, or "off". Off by default: a session filter has to earn its
+# place in the replay before it removes trades. Needs the tzdata package on
+# Windows, which has no time zone database of its own.
+ict_kill_zones = envStr("ICT_KILL_ZONES", "off")
+ict_kill_zone_tz = envStr("ICT_KILL_ZONE_TZ", "America/New_York")
+
+# What the stop hides under: "candle1" is the gap's first candle's low,
+# "leglow" the lowest low of the move from the sweep to the structure shift.
+# Either way the stop also stays under every low from the gap's third candle
+# to the retest.
+ict_stop_ref = envStr("ICT_STOP_REF", "candle1")
+
+# The stop sits this many ATR under that reference...
+ict_stop_buffer_atr = envFloat("ICT_STOP_BUFFER_ATR", 0.1)
+
+# ...and at least this many ATR under the live price. A structure stop tighter
+# than that sits inside ordinary 15-minute noise, so it is widened, not refused.
+ict_stop_floor_atr = envFloat("ICT_STOP_FLOOR_ATR", 1.5)
+
+# When the liquidation cap pulls the stop above the structural stop, the stop
+# no longer sits where the setup is wrong, and the trade is refused. true takes
+# it with the capped stop instead.
+ict_allow_capped_stop = envBool("ICT_ALLOW_CAPPED_STOP", False)
+
+# The target is the nearest untouched buy-side level that existed before the
+# sweep. Closer than this many times the risk, the trade is refused: fees would
+# take most of the win. With no such level, the target is the fallback
+# multiple of the risk.
+ict_min_rr = envFloat("ICT_MIN_RR", 1.5)
+ict_fallback_target_r = envFloat("ICT_FALLBACK_TARGET_R", 2.0)
 
 # ---------------------------------------------------------------------------
 # risk model - where the stop, target and trail actually go
@@ -405,10 +485,15 @@ risk_model = envStr("RISK_MODEL", "atr")
 # 15-minute candle is mostly noise by comparison and needs more room. Replayed
 # over 26 days on ten symbols, 3/6 beat 2/4 in both halves of the sample, with
 # fewer trades stopped out by ordinary wiggle.
+#
+# No trail (0). A 1.5 ATR pullback is ordinary on 15-minute candles, so a
+# trail armed at +3 ATR closed most winners between +1.5 and +3 ATR, short of
+# the +6 ATR target that breakout's replay result came from. That replay never
+# modelled the trail at all.
 atr_period = envInt("ATR_PERIOD", 14)
 atr_stop_mult = envFloat("ATR_STOP_MULT", 3.0)
 atr_target_mult = envFloat("ATR_TARGET_MULT", 6.0)
-atr_trail_mult = envFloat("ATR_TRAIL_MULT", 1.5)
+atr_trail_mult = envFloat("ATR_TRAIL_MULT", 0.0)
 atr_trail_activation_mult = envFloat("ATR_TRAIL_ACTIVATION_MULT", 3.0)
 
 # HOW CLOSE THE STOP MAY GET TO THE LIQUIDATION PRICE.
@@ -437,17 +522,14 @@ min_stop_atr_mult = envFloat("MIN_STOP_ATR_MULT", 1.0)
 
 # Percentage model, and the fallback for the ATR model. Fractions of the entry
 # price: 0.05 == 5%. Set any of them to 0 to disable that leg.
-#
-# The stop is a disaster brake, not the primary exit - the strategy's own rule
-# is what normally closes a position - so it is set wide enough to stay out of
-# the way of ordinary noise.
 stop_loss_pct = envFloat("STOP_LOSS_PCT", 0.05)
 take_profit_pct = envFloat("TAKE_PROFIT_PCT", 0.10)
 
 # Trailing stop. Bybit's API takes a PRICE DISTANCE here, not a percentage
 # (verified against the v5 docs: "Trailing stop by price distance"), so this
-# fraction gets multiplied by the entry price before being sent.
-trailing_stop_pct = envFloat("TRAILING_STOP_PCT", 0.03)
+# fraction gets multiplied by the entry price before being sent. Off (0), for
+# the same reason as ATR_TRAIL_MULT.
+trailing_stop_pct = envFloat("TRAILING_STOP_PCT", 0.0)
 
 # Trailing stop activation. The trail stays dormant until price reaches
 # entry * (1 + this).
@@ -521,8 +603,20 @@ kill_grace_seconds = envInt("KILL_GRACE_SECONDS", 5)
 # about in validate(), because a stale key in .env that is silently ignored is
 # the kind of thing that costs an afternoon.
 retired_settings = {
-    "SMA_FAST_PERIOD": "replaced by EMA_FAST_PERIOD",
-    "SMA_SLOW_PERIOD": "replaced by EMA_SLOW_PERIOD (REGIME_PERIOD is the slow line now)",
+    "SMA_FAST_PERIOD": "the trend strategy was removed",
+    "SMA_SLOW_PERIOD": "the trend strategy was removed (REGIME_PERIOD is the slow line)",
+    "RSI_PERIOD": "the meanrev strategy was removed",
+    "RSI_OVERSOLD": "the meanrev strategy was removed",
+    "RSI_OVERBOUGHT": "the meanrev strategy was removed",
+    "MEANREV_EXIT_SMA_PERIOD": "the meanrev strategy was removed",
+    "BB_PERIOD": "the scalp strategy was removed",
+    "BB_STDEV": "the scalp strategy was removed",
+    "BB_LOOKBACK_BARS": "the scalp strategy was removed",
+    "PULLBACK_DISPLACEMENT_MIN_ATR": "the pullback strategy was removed",
+    "EMA_FAST_PERIOD": "the trend strategy was removed",
+    "EMA_SLOW_PERIOD": "the trend strategy was removed",
+    "ADX_PERIOD": "the trend strategy was removed",
+    "ADX_MIN": "the trend strategy was removed",
 }
 
 
@@ -550,7 +644,7 @@ def warnings():
     for name, replacement in sorted(retired_settings.items()):
         if os.environ.get(name):
             notes.append("%s is set but no longer used - %s" % (name, replacement))
-    if breakout_exit_lookback > breakout_lookback:
+    if breakout_exit_lookback > 0 and breakout_exit_lookback > breakout_lookback:
         notes.append(
             "BREAKOUT_EXIT_LOOKBACK (%d) is longer than BREAKOUT_LOOKBACK (%d), so the "
             "exit channel is wider than the entry channel and the trade gives back most "
@@ -563,6 +657,14 @@ def warnings():
             "rare. Expect very few trades." % (min_entry_votes, min_entry_votes)
         )
     live = active_strategies if strategy == "multi" else [strategy]
+    idle = [name for name in short_strategies if name in strategy_names and name not in live]
+    if idle:
+        notes.append(
+            "SHORT_STRATEGIES names %s, which %s not live (see ACTIVE_STRATEGIES and "
+            "STRATEGY), so %s neither side."
+            % (", ".join(idle), "is" if len(idle) == 1 else "are",
+               "it trades" if len(idle) == 1 else "they trade")
+        )
     clocks = sorted({strategy_timeframes.get(name, entry_timeframe) for name in live})
     if len(clocks) > 1 and not max_open_per_strategy:
         notes.append(
@@ -578,11 +680,23 @@ def warnings():
             "and that signal is bought again. Match them to trade each signal once."
             % (reentry_cooldown_bars, signal_lookback_bars)
         )
+    if ict_fallback_target_r < ict_min_rr:
+        notes.append(
+            "ICT_FALLBACK_TARGET_R (%g) is under ICT_MIN_RR (%g), so a level setup with no "
+            "draw in its direction is taken at %gR while one whose nearest draw is closer than %gR is "
+            "refused." % (ict_fallback_target_r, ict_min_rr, ict_fallback_target_r, ict_min_rr)
+        )
+    if ict_stop_floor_atr < min_stop_atr_mult:
+        notes.append(
+            "ICT_STOP_FLOOR_ATR (%g) is under MIN_STOP_ATR_MULT (%g), so a level setup's "
+            "stop can sit %g ATR from the price, closer than the %g ATR a capped stop is "
+            "refused under as noise."
+            % (ict_stop_floor_atr, min_stop_atr_mult, ict_stop_floor_atr, min_stop_atr_mult)
+        )
     if not regime_filter and strategy == "multi" and len(active_strategies) > 1:
         notes.append(
-            "REGIME_FILTER is off while several strategies run together. Mean reversion "
-            "buys weakness and trend following buys strength, so without the filter they "
-            "will take opposite views of the same market."
+            "REGIME_FILTER is off while several strategies run together, so nothing keeps "
+            "them trading the same direction as the slow trend."
         )
     return notes
 
@@ -591,7 +705,7 @@ def validate():
     """Return a list of human-readable configuration problems. Non-empty means
     the run is refused."""
     problems = []
-    known = ("trend", "meanrev", "breakout", "scalp")
+    known = strategy_names
 
     if not bybit_api_key or not bybit_api_secret:
         problems.append("BYBIT_API_KEY / BYBIT_API_SECRET are not set")
@@ -599,7 +713,8 @@ def validate():
 
     if strategy not in known + ("multi",):
         problems.append(
-            "STRATEGY must be one of 'trend', 'meanrev', 'breakout', 'multi', got %r" % strategy
+            "STRATEGY must be one of %s or 'multi', got %r"
+            % (", ".join(repr(name) for name in known), strategy)
         )
 
     if strategy == "multi":
@@ -617,6 +732,13 @@ def validate():
                 "MIN_ENTRY_VOTES (%d) is higher than the %d active strateg(ies), so no "
                 "entry can ever fire" % (min_entry_votes, len(live))
             )
+
+    unknown = [name for name in short_strategies if name not in known]
+    if unknown:
+        problems.append(
+            "SHORT_STRATEGIES contains unknown %s - valid names are %s"
+            % (", ".join(repr(name) for name in unknown), ", ".join(known))
+        )
 
     if min_entry_votes < 1:
         problems.append("MIN_ENTRY_VOTES must be >= 1")
@@ -646,24 +768,15 @@ def validate():
     if order_bucket_seconds < 1:
         problems.append("ORDER_BUCKET_SECONDS must be >= 1")
 
-    if ema_fast_period >= ema_slow_period:
-        problems.append("EMA_FAST_PERIOD must be smaller than EMA_SLOW_PERIOD")
     if regime_filter and regime_period < 2:
         problems.append("REGIME_PERIOD must be >= 2 while REGIME_FILTER is on")
-    if rsi_oversold >= rsi_overbought:
-        problems.append("RSI_OVERSOLD must be below RSI_OVERBOUGHT")
-    if rsi_period < 2:
-        problems.append("RSI_PERIOD must be >= 2")
-    if adx_min < 0:
-        problems.append("ADX_MIN must be >= 0 (0 disables the filter)")
     if signal_lookback_bars < 1:
         problems.append("SIGNAL_LOOKBACK_BARS must be >= 1")
-    if bb_period < 2:
-        problems.append("BB_PERIOD must be >= 2")
-    if bb_stdev <= 0:
-        problems.append("BB_STDEV must be > 0")
-    if bb_lookback_bars < 1:
-        problems.append("BB_LOOKBACK_BARS must be >= 1")
+    if breakout_lookback < 1:
+        problems.append("BREAKOUT_LOOKBACK must be >= 1")
+    if breakout_exit_lookback < 0:
+        problems.append("BREAKOUT_EXIT_LOOKBACK must be >= 0 (0 means no rule exit)")
+    problems.extend(ictProblems())
     for name in strategy_timeframes:
         if name not in known:
             problems.append(
@@ -709,4 +822,49 @@ def validate():
             "risks more than it can win." % (atr_target_mult, atr_stop_mult)
         )
 
+    return problems
+
+
+def ictProblems():
+    """validate()'s checks for the ICT settings."""
+    problems = []
+    at_least = [("ICT_SWING_BARS", ict_swing_bars, 1),
+                ("ICT_LIQUIDITY_LOOKBACK_BARS", ict_liquidity_lookback_bars, 1),
+                ("ICT_SWEEP_RECLAIM_BARS", ict_sweep_reclaim_bars, 0),
+                ("ICT_MSS_MAX_BARS", ict_mss_max_bars, 0),
+                ("ICT_FVG_MAX_AGE_BARS", ict_fvg_max_age_bars, 1),
+                ("ICT_DISPLACEMENT_MIN_ATR", ict_displacement_min_atr, 0),
+                ("ICT_FVG_MIN_ATR", ict_fvg_min_atr, 0),
+                ("ICT_MAX_CHASE_ATR", ict_max_chase_atr, 0),
+                ("ICT_STOP_BUFFER_ATR", ict_stop_buffer_atr, 0),
+                ("ICT_STOP_FLOOR_ATR", ict_stop_floor_atr, 0)]
+    for name, value, floor in at_least:
+        if value < floor:
+            problems.append("%s must be >= %s, got %s" % (name, floor, value))
+    if not 0 <= ict_entry_close_min <= 1:
+        problems.append("ICT_ENTRY_CLOSE_MIN must be between 0 and 1, got %s"
+                        % ict_entry_close_min)
+    if ict_min_rr <= 0:
+        problems.append("ICT_MIN_RR must be > 0, got %s" % ict_min_rr)
+    if ict_fallback_target_r <= 0:
+        problems.append("ICT_FALLBACK_TARGET_R must be > 0, got %s" % ict_fallback_target_r)
+    if ict_stop_ref not in ("candle1", "leglow"):
+        problems.append("ICT_STOP_REF must be 'candle1' or 'leglow', got %r" % ict_stop_ref)
+
+    try:
+        zones = parseKillZones(ict_kill_zones)
+    except ValueError as error:
+        problems.append("ICT_KILL_ZONES must be 'off' or HH:MM-HH:MM,... - %s" % error)
+        zones = None
+    if zones:
+        # Only with kill zones on: the time zone database is not needed
+        # otherwise, and Windows has none without the tzdata package.
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(ict_kill_zone_tz)
+        except Exception as error:
+            problems.append(
+                "ICT_KILL_ZONE_TZ %r cannot be loaded (%s). On Windows the time zone "
+                "database comes from the tzdata package: pip install -r requirements.txt"
+                % (ict_kill_zone_tz, error))
     return problems

@@ -18,7 +18,8 @@ Bybit's v5 API cannot attach a trailing stop to an order at creation time.
 field at all; trailingStop lives only on /v5/position/trading-stop, which
 operates on an existing position. So an entry is:
 
-  1. POST /v5/order/create   -> market buy, with stopLoss + takeProfit attached
+  1. POST /v5/order/create   -> market buy (sell for a short), with stopLoss +
+     takeProfit attached
   2. POST /v5/position/trading-stop -> trailingStop (+ activePrice) on the
      position that step 1 just created
 
@@ -150,6 +151,19 @@ def positionSize(position):
     if size is None:
         size = (position.get("info") or {}).get("size")
     return float(size or 0)
+
+
+def positionSide(position):
+    """"long" or "short", read from the exchange row and never stored.
+
+    ccxt's own `side` first, then Bybit's raw Buy / Sell. A row that says
+    neither is taken for a long, the only side the bot opened before shorts.
+    """
+    side = (position.get("side") or "").lower()
+    if side in (signals.long, signals.short):
+        return side
+    raw = ((position.get("info") or {}).get("side") or "").lower()
+    return signals.short if raw == "sell" else signals.long
 
 
 # ---------------------------------------------------------------------------
@@ -287,53 +301,171 @@ def capStopAtLiquidation(distances, entry_price):
                max(1, config.leverage)))
 
 
-def exitPrices(spec, entry_price, atr_value=None):
-    """Stop loss / take profit prices and the trailing distance, for a long.
+def planEntry(spec, side, setup, price, atr_value=None):
+    """The bracket of one entry, planned and judged before anything is sized.
+
+    Pure: no client, no clock, so the live bot and the replay plan an entry
+    with the same code. Returns stop_loss, take_profit, the trail, the risk
+    model, a cap note, the stop distance and `refused`: None, or a
+    (code, reason) pair for a trade that must not be taken.
+
+    Refusal codes: "price" when the settings put a stop or target on the wrong
+    side of the price, which is a misconfiguration and not a market view, and
+    "min-stop" when the liquidation cap squeezes the stop inside normal noise.
+    A level setup adds "atr", "chase", "capped-stop" and "reward-risk"; see
+    planLevels().
+
+    `setup` is None for the ATR bracket, or a signals.LevelSetup when the
+    strategy read its stop and target off the chart.
 
     trailing_distance is a PRICE DISTANCE, not a percentage: the Bybit v5 docs
     define trailingStop as "Trailing stop by price distance". Sending 1.5
     meaning "1.5%" would actually ask for a 1.5 USDT trail, which on BTC is a
     stop roughly at the current price.
+
+    A short is the long mirrored: the stop sits above the price and rounds UP,
+    the target below and rounds DOWN. On either side both levels round away
+    from the price, so neither is ever closer to it than asked.
     """
+    if setup is not None:
+        return planLevels(spec, side, setup, price, atr_value)
+
     tick = spec["tick_size"]
-    distances, model = riskDistances(entry_price, atr_value)
-    capped = capStopAtLiquidation(distances, entry_price)
-    prices = {"stop_loss": None, "take_profit": None, "trailing_distance": None,
-              "trailing_activation": None, "risk_model": model, "capped": capped,
-              "stop_distance": distances["stop"]}
+    sign, stop_round, target_round = sided(side)
+
+    distances, model = riskDistances(price, atr_value)
+    capped = capStopAtLiquidation(distances, price)
+    plan = {"stop_loss": None, "take_profit": None, "trailing_distance": None,
+            "trailing_activation": None, "risk_model": model, "capped": capped,
+            "stop_distance": distances["stop"], "refused": None}
 
     if distances["stop"] > 0:
-        # round DOWN so the stop sits at or slightly further from entry, never
-        # closer than requested
-        stop = floorToStep(entry_price - distances["stop"], tick)
-        if stop <= 0 or stop >= entry_price:
-            raise ExecutionError(
-                "stop loss %.8f is not below entry %.8f - check the %s risk settings"
-                % (stop, entry_price, config.risk_model)
-            )
-        prices["stop_loss"] = stop
+        stop = stop_round(price - sign * distances["stop"], tick)
+        if stop <= 0 or sign * (stop - price) >= 0:
+            plan["refused"] = ("price", "stop loss %.8f is not %s entry %.8f - check the %s "
+                               "risk settings" % (stop, "below" if sign > 0 else "above",
+                                                  price, config.risk_model))
+            return plan
+        plan["stop_loss"] = stop
 
     if distances["target"] > 0:
-        # round UP for the same reason, in the other direction
-        target = ceilToStep(entry_price + distances["target"], tick)
-        if target <= entry_price:
-            raise ExecutionError(
-                "take profit %.8f is not above entry %.8f - check the %s risk settings"
-                % (target, entry_price, config.risk_model)
-            )
-        prices["take_profit"] = target
+        target = target_round(price + sign * distances["target"], tick)
+        if target <= 0 or sign * (target - price) <= 0:
+            plan["refused"] = ("price", "take profit %.8f is not %s entry %.8f - check the %s "
+                               "risk settings" % (target, "above" if sign > 0 else "below",
+                                                  price, config.risk_model))
+            return plan
+        plan["take_profit"] = target
 
     if distances["trail"] > 0:
         distance = ceilToStep(distances["trail"], tick)
         if distance < tick:
             distance = tick
-        prices["trailing_distance"] = distance
+        plan["trailing_distance"] = distance
         if distances["activation"] > 0:
-            prices["trailing_activation"] = ceilToStep(
-                entry_price + distances["activation"], tick
-            )
+            plan["trailing_activation"] = target_round(price + sign * distances["activation"], tick)
 
-    return prices
+    too_tight, why = stopTooTight(plan, atr_value)
+    if too_tight:
+        plan["refused"] = ("min-stop", why)
+    return plan
+
+
+def sided(side):
+    """(sign, stop rounding, target rounding) for one side: +1 for a long and
+    -1 for a short, and each level rounded away from the price on its own
+    side, so the stop only gets further."""
+    if side == signals.long:
+        return 1.0, floorToStep, ceilToStep
+    return -1.0, ceilToStep, floorToStep
+
+
+def planLevels(spec, side, setup, price, atr_value):
+    """planEntry for a setup read off the chart, in the order the rules give:
+
+      1. "chase": the live price must still be in the gap - above its bottom
+         and at most ICT_MAX_CHASE_ATR above its top. A market order further
+         away would not fill at the level the setup is about.
+      2. the structural stop, ICT_STOP_BUFFER_ATR under the setup's
+         structure, widened to at least ICT_STOP_FLOOR_ATR under the price
+      3. the liquidation cap, as for every entry
+      4. "capped-stop": the cap pulled the stop above the structural stop, so
+         it no longer sits where the setup is wrong (unless
+         ICT_ALLOW_CAPPED_STOP)
+      5. "min-stop": the shared minimum-stop check
+      6. "reward-risk": the target is the nearest draw beyond the price, the
+         level itself; nearer than ICT_MIN_RR times the risk refuses the trade,
+         and with no draw at all the target is ICT_FALLBACK_TARGET_R times the
+         risk.
+
+    The setup is on the chart the rule read, the mirrored one for a short, so
+    everything is measured there (`sign` turns a real price into a chart
+    price and back) and only the rounding happens on real prices. No trail.
+    """
+    tick = spec["tick_size"]
+    sign, stop_round, target_round = sided(side)
+    plan = {"stop_loss": None, "take_profit": None, "trailing_distance": None,
+            "trailing_activation": None, "risk_model": "levels", "capped": None,
+            "stop_distance": None, "refused": None}
+    if not atr_value or atr_value <= 0:
+        plan["refused"] = ("atr", "no ATR to measure the setup's stop and chase limit with")
+        return plan
+
+    live = sign * price
+    lowest, highest = sorted((sign * setup.bottom, sign * setup.top))
+    ceiling = setup.top + config.ict_max_chase_atr * atr_value
+    if not setup.bottom < live <= ceiling:
+        allowed = sorted((sign * setup.bottom, sign * ceiling))
+        plan["refused"] = ("chase", "the live price %.8f has left the gap %.8f-%.8f: entries "
+                           "are allowed from %.8f to %.8f (ICT_MAX_CHASE_ATR=%.4g)"
+                           % (price, lowest, highest, allowed[0], allowed[1],
+                              config.ict_max_chase_atr))
+        return plan
+
+    structural = setup.structural - config.ict_stop_buffer_atr * atr_value
+    stop = min(structural, live - config.ict_stop_floor_atr * atr_value)
+    distances = {"stop": live - stop}
+    plan["capped"] = capStopAtLiquidation(distances, price)
+    stop = live - distances["stop"]
+    if plan["capped"] and stop > structural and not config.ict_allow_capped_stop:
+        plan["refused"] = ("capped-stop", "the liquidation cap pulls the stop to %.8f, inside "
+                           "the setup's structure at %.8f, where noise takes it "
+                           "(ICT_ALLOW_CAPPED_STOP=false)" % (sign * stop, sign * structural))
+        return plan
+
+    stop_price = stop_round(sign * stop, tick)
+    if stop_price <= 0 or sign * (stop_price - price) >= 0:
+        plan["refused"] = ("price", "stop loss %.8f is not %s entry %.8f"
+                           % (stop_price, "below" if sign > 0 else "above", price))
+        return plan
+    plan["stop_loss"] = stop_price
+    plan["stop_distance"] = risk = abs(price - stop_price)
+    too_tight, why = stopTooTight(plan, atr_value)
+    if too_tight:
+        plan["refused"] = ("min-stop", why)
+        return plan
+
+    ahead = [draw for draw in setup.draws if draw > live]
+    if ahead:
+        draw = min(ahead)
+        if draw - live < config.ict_min_rr * risk:
+            plan["refused"] = ("reward-risk", "the nearest draw %.8f is %.2f times the risk "
+                               "away, under ICT_MIN_RR=%.4g"
+                               % (sign * draw, (draw - live) / risk, config.ict_min_rr))
+            return plan
+        target = draw
+        plan["risk_model"] = "levels, draw %.8f" % (sign * draw)
+    else:
+        target = live + config.ict_fallback_target_r * risk
+        plan["risk_model"] = "levels, no draw, %.4gR" % config.ict_fallback_target_r
+
+    target_price = target_round(sign * target, tick)
+    if target_price <= 0 or sign * (target_price - price) <= 0:
+        plan["refused"] = ("price", "take profit %.8f is not %s entry %.8f"
+                           % (target_price, "above" if sign > 0 else "below", price))
+        return plan
+    plan["take_profit"] = target_price
+    return plan
 
 
 def stopTooTight(targets, atr_value):
@@ -363,14 +495,21 @@ def stopTooTight(targets, atr_value):
 # ---------------------------------------------------------------------------
 
 
+# Tag letters no strategy may take. "c" marks the bot's own close and "x" an
+# order with no strategy. A removed strategy's letter is never reused, so an
+# old order id in Bybit's history is never read as a newer strategy's.
+reserved_tags = {"c": "the bot's close", "x": "no strategy", "p": "pullback, removed",
+                 "t": "trend, removed"}
+
+
 def strategyTag(strategy):
     """One character standing for the strategy, for the order id.
 
     Bybit shows orderLinkId in its own UI, so tagging the id means you can
     tell at a glance which rule opened a position without consulting anything
     local. Derived from the name rather than a hardcoded table, so adding a
-    strategy needs no change here - validated for collisions in validate()'s
-    sibling checks by the fact that the names differ in their first letter.
+    strategy needs no change here. tests/test_helpers.py checks that no two
+    strategies share a letter and that none takes one of reserved_tags.
     """
     if not strategy:
         return "x"
@@ -452,7 +591,7 @@ def execute(client, symbol, decision, last_close, log, atr_value=None):
     model sizes the stop, target and trail from; pass None and the percentage
     model takes over.
     """
-    if decision.action != signals.buy:
+    if decision.action != signals.enter:
         log("%s: no entry - %s" % (symbol, decision.reason))
         return {"opened": False, "reason": decision.reason}
 
@@ -481,20 +620,26 @@ def execute(client, symbol, decision, last_close, log, atr_value=None):
         log("%s: no entry - %s" % (symbol, why))
         return {"opened": False, "reason": why, "skipped_no_price": True}
 
+    side = decision.side
     spec = instrumentSpec(client, symbol)
-    qty = computeQty(spec, price, config.position_notional_usdt)
-    applyLeverage(client, symbol, log)
 
-    targets = exitPrices(spec, price, atr_value)
+    # Planned before sizing and before leverage is touched: a refused trade
+    # must cost the exchange nothing.
+    targets = planEntry(spec, side, decision.setup, price, atr_value)
 
     if targets["capped"]:
         log("%s: %s" % (symbol, targets["capped"]))
-    too_tight, why = stopTooTight(targets, atr_value)
-    if too_tight:
+    if targets["refused"]:
+        code, why = targets["refused"]
+        if code == "price":
+            raise ExecutionError(why)
         # Not an error and not a failed run: this is a risk decision, and a
         # skipped trade is a correct outcome worth seeing in the log.
         log("%s: no entry - %s" % (symbol, why))
         return {"opened": False, "reason": why, "skipped_for_risk": True}
+
+    qty = computeQty(spec, price, config.position_notional_usdt)
+    applyLeverage(client, symbol, log)
 
     order_link_id = buildOrderLinkId(spec["market_id"], decision.strategy)
 
@@ -515,10 +660,11 @@ def execute(client, symbol, decision, last_close, log, atr_value=None):
     # order, so a stale signal is visible in the log.
     moved = 100.0 * (price / last_close - 1.0) if last_close else 0.0
     log(
-        "%s: opening long qty=%s @~%.6f live, last close %.6f (%+.2f%%) "
+        "%s: opening %s qty=%s @~%.6f live, last close %.6f (%+.2f%%) "
         "(notional %.2f USDT, %sx) strategy=%s risk=%s sl=%s tp=%s linkId=%s"
         % (
             symbol,
+            side,
             formatDecimal(qty, spec["qty_step"]),
             price,
             last_close,
@@ -533,7 +679,8 @@ def execute(client, symbol, decision, last_close, log, atr_value=None):
         )
     )
 
-    order = client.create_order(symbol, "market", "buy", qty, None, params)
+    order = client.create_order(symbol, "market", "buy" if side == signals.long else "sell",
+                                qty, None, params)
 
     trailing = applyTrailingStop(client, spec, targets, log)
 
@@ -544,6 +691,7 @@ def execute(client, symbol, decision, last_close, log, atr_value=None):
         "votes": decision.votes,
         "risk_model": targets["risk_model"],
         "symbol": symbol,
+        "side": side,
         "qty": qty,
         "price": price,
         "notional": qty * price,
@@ -577,7 +725,7 @@ def applyTrailingStop(client, spec, targets, log):
         "symbol": spec["market_id"],
         "positionIdx": config.position_idx,
         "tpslMode": "Full",
-        # price distance, not percent - see exitPrices()
+        # price distance, not percent - see planEntry()
         "trailingStop": formatDecimal(targets["trailing_distance"], spec["tick_size"]),
     }
     if targets["trailing_activation"] is not None:
@@ -612,7 +760,7 @@ def closePosition(client, symbol, position, reason, log):
     if size <= 0:
         return {"closed": False, "reason": "nothing to close"}
 
-    side = "sell" if (position.get("side") or "long") == "long" else "buy"
+    side = "sell" if positionSide(position) == signals.long else "buy"
     params = {
         "category": config.category,
         "positionIdx": config.position_idx,

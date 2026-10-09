@@ -385,9 +385,15 @@ def printSettings(interval, looping, force_entry):
           % (config.strategy, ", ".join(signals.activeStrategies()) or "none"))
     print("  entry vote:  %d of %d strateg(ies) must agree"
           % (config.min_entry_votes, len(signals.activeStrategies())))
-    print("  regime:      %s"
-          % (("long only above SMA%d" % config.regime_period)
-             if config.regime_filter else "filter OFF"))
+    shorts = signals.shortStrategies()
+    print("  shorts:      %s" % (", ".join(shorts) or "none, long only"))
+    if not config.regime_filter:
+        regime = "filter OFF"
+    elif shorts:
+        regime = "long above, short below SMA%d" % config.regime_period
+    else:
+        regime = "long only above SMA%d" % config.regime_period
+    print("  regime:      %s" % regime)
     print("  risk model:  %s" % config.risk_model)
     # Notional and margin are shown together on purpose. They are the two
     # numbers people most often confuse, and leverage silently decides which
