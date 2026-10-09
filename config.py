@@ -763,6 +763,7 @@ def validate():
         problems.append("MAX_OPEN_POSITIONS must be >= 0 (0 means no cap)")
     if reentry_cooldown_bars < 0:
         problems.append("REENTRY_COOLDOWN_BARS must be >= 0 (0 disables the cooldown)")
+    problems.extend(closedReadProblems())
     if loop_interval_minutes < 1:
         problems.append("LOOP_INTERVAL_MINUTES must be >= 1")
     if order_bucket_seconds < 1:
@@ -822,6 +823,45 @@ def validate():
             "risks more than it can win." % (atr_target_mult, atr_stop_mult)
         )
 
+    return problems
+
+
+# Given only startTime, one /v5/position/closed-pnl request covers at most
+# seven days (Bybit v5 docs). Not a knob: it is the exchange's limit.
+closed_read_max_minutes = 7 * 24 * 60
+
+
+def closedReadProblems():
+    """validate()'s check that one close-history read reaches back far enough.
+
+    Each cycle reads the larger of CLOSED_LOOKBACK_MINUTES and the re-entry
+    cooldown on the slowest live timeframe. Past seven days Bybit would answer
+    with the oldest week and miss the newest closes.
+    """
+    problems = []
+    if closed_lookback_minutes > closed_read_max_minutes:
+        problems.append(
+            "CLOSED_LOOKBACK_MINUTES (%d) is more than the %d minute(s) (seven days) one "
+            "Bybit read covers, so the newest closes would be missed."
+            % (closed_lookback_minutes, closed_read_max_minutes))
+    if reentry_cooldown_bars <= 0:
+        return problems
+    import ccxt
+    live = active_strategies if strategy == "multi" else [strategy]
+    for name in live:
+        if name not in strategy_names:
+            continue
+        timeframe = strategy_timeframes.get(name, entry_timeframe)
+        try:
+            minutes = reentry_cooldown_bars * ccxt.Exchange.parse_timeframe(timeframe) // 60
+        except Exception:
+            continue
+        if minutes > closed_read_max_minutes:
+            problems.append(
+                "REENTRY_COOLDOWN_BARS=%d on %s's %s candles needs %d minute(s) of close "
+                "history, but one Bybit read covers at most %d (seven days), so the newest "
+                "closes would be missed. Shorten the cooldown or the timeframe."
+                % (reentry_cooldown_bars, name, timeframe, minutes, closed_read_max_minutes))
     return problems
 
 

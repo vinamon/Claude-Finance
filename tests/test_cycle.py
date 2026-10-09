@@ -986,6 +986,27 @@ class ReentryCooldown(unittest.TestCase):
         self.assertIn("CONFIG ERROR: REENTRY_COOLDOWN_BARS must be >= 0", cycle.output)
         self.assertEqual(client.created_orders, [])
 
+    def testACooldownLongerThanOneCloseHistoryReadIsRefused(self):
+        # Given only a start time, Bybit answers one closed-pnl read with at
+        # most seven days, so eight daily candles would read the oldest week
+        # and miss the newest closes.
+        client = FakeBybit(bars=candles(**flat_2000))
+
+        cycle = runCycle(client, force_entry=True, active_strategies=["breakout"],
+                         strategy_timeframes={"breakout": "1d"}, reentry_cooldown_bars=8,
+                         **risk)
+
+        self.assertEqual(cycle.exit_code, 1, cycle.output)
+        self.assertIn("CONFIG ERROR: REENTRY_COOLDOWN_BARS=8 on breakout's 1d candles needs "
+                      "11520 minute(s) of close history", cycle.output)
+        self.assertEqual(client.created_orders, [])
+
+    def testACooldownOfExactlySevenDaysIsAccepted(self):
+        cycle = runCycle(FakeBybit(), active_strategies=["breakout"],
+                         strategy_timeframes={"breakout": "1d"}, reentry_cooldown_bars=7)
+
+        self.assertNotIn("CONFIG ERROR", cycle.output)
+
 
 class ShortLog(unittest.TestCase):
     """LOG_DETAIL off: only what changed, errors, and one summary line."""
